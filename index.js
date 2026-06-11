@@ -214,7 +214,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("😺 management cycle", "evaluating positions...");
+      liveMessage = await createLiveMessage("🟢 management cycle", "evaluating positions...");
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -301,7 +301,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       const fees    = `$${(feesUsd ?? 0).toFixed(2)}`;
       const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
 
-      // Status emoji per position (cute + informative)
+      // Status emoji per position (clock-themed, no cats)
       let status;
       if (act.action === "CLOSE" && act.rule === "exit") {
         status = "🎯 TP";
@@ -313,13 +313,10 @@ export async function runManagementCycle({ silent = false } = {}) {
         status = "🤔 eval";
       } else if (!p.in_range) {
         const oorM = p.minutes_out_of_range != null ? p.minutes_out_of_range : 0;
-        status = `😾 OOR ${oorM}m`;
-      } else if ((p.pnl_pct ?? 0) > 0) {
-        status = "😺 hold";
-      } else if ((p.pnl_pct ?? 0) < 0) {
-        status = "🐱 hold";
+        status = `⏰ OOR ${oorM}m`;
       } else {
-        status = "🌱 hold";
+        // In range (pnl + / - / 0 all collapse to one indicator)
+        status = "✅ hold";
       }
 
       // Trim very long pair names
@@ -360,7 +357,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       headerEmoji = "😵";
       headerTag = "wobbly";
     } else if (totalPnl > 0) {
-      headerEmoji = "😺";
+      headerEmoji = "🟢";
       headerTag = "looking good";
     } else if (totalPnl < 0) {
       headerEmoji = "🫠";
