@@ -1366,6 +1366,15 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                   : safeNum(lpData.pnl?.value)
               ) * 10000) / 10000
             : binData
+            ? Math.round(deriveOpenPnlValue(binData, config.management.solMode) * 10000) / 10000
+            : null,
+          pnl_usd_meteora:    lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.pnl?.valueNative)
+                  : safeNum(lpData.pnl?.value)
+              ) * 10000) / 10000
+            : binData
             ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
             : null,
           pnl_true_usd:       lpData

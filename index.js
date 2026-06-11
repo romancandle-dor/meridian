@@ -352,6 +352,20 @@ After executing, write a brief one-line result per position.
       mgmtReport += `\n\n${content}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
+      // Per-position PnL snapshot for cross-check vs pnl_warn (formula vs Meteora).
+      for (const p of positionData) {
+        const cur = config.management.solMode ? "◎" : "$";
+        const ours = p.pnl_usd != null ? p.pnl_usd : 0;
+        const meteora = p.pnl_usd_meteora != null ? p.pnl_usd_meteora : 0;
+        const delta = ours - meteora;
+        const flag = config.management.solMode
+          ? (Math.abs(delta) > 0.005 ? " ⚠️" : " ✓")
+          : (Math.abs(delta) > 0.5 ? " ⚠️" : " ✓");
+        log(
+          "pnl_snapshot",
+          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, derived ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | delta ${delta.toFixed(4)}${flag}`,
+        );
+      }
       await liveMessage?.note("No tool actions needed.");
     }
 
