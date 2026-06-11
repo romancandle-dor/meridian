@@ -324,17 +324,17 @@ export async function runManagementCycle({ silent = false } = {}) {
     });
 
     if (actionPositions.length > 0) {
-      log("cron", `Management: ${actionPositions.length} tindakan dibutuhake — nimbali LLM [model: ${config.llm.managementModel}]`);
+      log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
 
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
         return [
-          `POSISI: ${p.pair} (${p.position})`,
-          `  kolam: ${p.pool}`,
-          `  tumindak: ${act.action}${act.rule && act.rule !== "exit" ? ` — Aturan ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
-          `  pnl_pct: ${p.pnl_pct}% | biaya_nganti_diklaim: ${cur}${p.unclaimed_fees_usd} | regane: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
-          `  bins: ngisor=${p.lower_bin} ndhuwur=${p.upper_bin} aktif=${p.active_bin} | oor_menit: ${p.minutes_out_of_range ?? 0}`,
-          p.instruction ? `  instruksi: "${p.instruction}"` : null,
+          `POSITION: ${p.pair} (${p.position})`,
+          `  pool: ${p.pool}`,
+          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+          `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+          p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
 
@@ -358,7 +358,7 @@ After executing, write a brief one-line result per position.
 
       mgmtReport += `\n\n${content}`;
     } else {
-      log("cron", "Management: kabeh posisi STAY — skip LLM");
+      log("cron", "Management: all positions STAY — skipping LLM");
       // Per-position PnL snapshot for cross-check vs pnl_warn (formula vs Meteora).
       for (const p of positionData) {
         const cur = config.management.solMode ? "◎" : "$";
@@ -370,10 +370,10 @@ After executing, write a brief one-line result per position.
           : (Math.abs(delta) > 0.5 ? " ⚠️" : " ✓");
         log(
           "pnl_snapshot",
-          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, asil rumus ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | bedane ${delta.toFixed(4)}${flag}`,
+          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, derived ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | delta ${delta.toFixed(4)}${flag}`,
         );
       }
-      await liveMessage?.note("Ora ana tindakan sing dibutuhake.");
+      await liveMessage?.note("No tool actions needed.");
     }
 
     // Trigger screening after management
