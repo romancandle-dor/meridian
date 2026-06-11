@@ -288,33 +288,56 @@ export async function runManagementCycle({ silent = false } = {}) {
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
     const cur = config.management.solMode ? "◎" : "$";
 
-    const blocks = positionData.map((p, i) => {
+    const blocks = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`.padStart(12);
-      const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%`.padStart(8) : "   ????";
-      const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`.padStart(10);
-      const age     = p.age_minutes != null ? `${p.age_minutes}m`.padStart(6) : "    ?";
-      const inRange = p.in_range ? "IN" : "OOR";
-      const oor     = !p.in_range && p.minutes_out_of_range != null ? ` ${p.minutes_out_of_range}m` : "";
-      const badge   = act.action === "INSTRUCTION" ? "📋EVAL" : act.action === "CLOSE" ? "❌CLOSE" : act.action === "CLAIM" ? "💰CLAIM" : "✅STAY";
-      let b = `  ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} ${val} ${pnl} ${fees} ${age} ${inRange}${oor} ${badge}`;
-      if (p.instruction) b += `\n     📝 "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.reason) b += `\n     ⚡ ${act.reason}`;
+      const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
+      const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+      const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
+      const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
+
+      // Status (action > OOR > stay)
+      let status;
+      if (act.action === "CLOSE" && act.rule === "exit") {
+        status = "⚡ TP";
+      } else if (act.action === "CLOSE") {
+        status = "❌ close";
+      } else if (act.action === "CLAIM") {
+        status = "💰 claim";
+      } else if (act.action === "INSTRUCTION") {
+        status = "📋 eval";
+      } else if (!p.in_range) {
+        const oorM = p.minutes_out_of_range != null ? p.minutes_out_of_range : 0;
+        status = `🔴 OOR ${oorM}m`;
+      } else {
+        status = "🟢 stay";
+      }
+
+      // Trim very long pair names
+      const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
+      let b = `  ${pair.padEnd(14)}  ${pnl.padStart(7)}  ${val.padStart(8)}  fees ${fees.padStart(6)}  ${age.padStart(4)}  ${status}`;
+      if (p.instruction) b += `\n      📝 "${p.instruction}"`;
+      if (act.action === "CLOSE" && act.reason && act.rule !== "exit") b += `\n      reason: ${act.reason}`;
       return b;
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
-      ? needsAction.map(a => a.action === "INSTRUCTION" ? "📋EVAL instruction" : `${a.action === "CLOSE" ? "❌CLOSE" : "💰CLAIM"}${a.reason ? `: ${a.reason}` : ""}`).join(" · ")
-      : "✅ all STAY";
+      ? needsAction.map(a => {
+          if (a.action === "CLOSE" && a.rule === "exit") return "⚡ TP";
+          if (a.action === "CLOSE") return `❌ ${a.reason || "close"}`;
+          if (a.action === "CLAIM") return "💰 claim";
+          if (a.action === "INSTRUCTION") return "📋 eval";
+          return a.action;
+        }).join(" · ")
+      : "all stay";
 
-    const line = "─".repeat(48);
+    const time = new Date().toUTCString().slice(17, 22);
     mgmtReport = [
-      `📊 Management: ${positions.length} position(s)`,
-      line,
+      `🔄 Management  ·  ${time} UTC  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
+      "",
       ...blocks,
-      line,
-      `  💰 ${cur}${totalValue.toFixed(2)} total  ·  🏦 ${cur}${totalUnclaimed.toFixed(2)} fees  ·  ${actionSummary}`,
+      "",
+      `  Total  ${cur}${totalValue.toFixed(2)}  ·  Fees  ${cur}${totalUnclaimed.toFixed(2)}  ·  ${actionSummary}`,
     ].join("\n");
 
     // ── Call LLM only if action needed ──────────────────────────────
@@ -1503,15 +1526,14 @@ async function telegramHandler(msg) {
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
-        const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`.padStart(10);
-        const pnlRaw   = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "   ????";
-        const pnl     = pnlRaw.padStart(7);
-        const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`.padStart(8);
-        const age     = p.age_minutes != null ? `${p.age_minutes}m`.padStart(5) : "   ?";
-        const oor     = !p.in_range ? " OOR" : "   ";
-        return `  ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} ${val} ${pnl} ${fees} ${age}${oor}`;
+        const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
+        const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+        const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
+        const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
+        const inRange = p.in_range ? "🟢" : "🔴OOR";
+        return ` ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} · ${val.padStart(8)} · ${pnl.padStart(7)} · ${fees.padStart(6)} · ${age.padStart(4)} · ${inRange}`;
       });
-      await sendMessage(`📊 Positions (${total_positions}):\n${"─".repeat(48)}\n${lines.join("\n")}\n${"─".repeat(48)}\n/close <n> · /set <n> <note>`);
+      await sendMessage(`📊 Positions (${total_positions}):\n${"─".repeat(40)}\n${lines.join("\n")}\n${"─".repeat(40)}\n/close <n> · /set <n> <note>`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
