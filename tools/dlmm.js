@@ -1014,13 +1014,20 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const currentValue = solMode
       ? safeNum(p.unrealizedPnl?.balancesSol)
       : safeNum(p.unrealizedPnl?.balances);
+    // Cross-check our explicit PnL formula vs Meteora's pre-computed.
+    // Logs a warning if delta exceeds the configured threshold.
+    validateOpenPnlValue(p, solMode);
+    // Use the explicit formula as the primary PnL source; fall back to Meteora's
+    // pre-computed value if the formula can't derive (e.g. missing deposits).
+    const explicitPnl = deriveOpenPnlValue(p, solMode);
+    const fallbackPnl = solMode ? safeNum(p.pnlSol) : safeNum(p.pnlUsd);
+    const derivedPnlPct = deriveOpenPnlPct(p, solMode);
     const reportedPnlPct = solMode
       ? maybeNum(p.pnlSolPctChange)
       : maybeNum(p.pnlPctChange);
-    const derivedPnlPct = deriveOpenPnlPct(p, solMode);
     return {
-      pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
-      pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
+      pnl_usd:           roundNum(explicitPnl || fallbackPnl, 4),
+      pnl_pct:           roundNum(derivedPnlPct ?? reportedPnlPct ?? 0, 2),
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
       all_time_fees_usd: roundNum(solMode ? p.allTimeFees?.total?.sol : p.allTimeFees?.total?.usd, 4),
@@ -1114,21 +1121,54 @@ function deriveOpenPnlPct(binData, solMode = false) {
     : safeNum(binData.allTimeDeposits?.total?.usd);
   if (deposit <= 0) return null;
 
+  const pnl = deriveOpenPnlValue(binData, solMode);
+  return (pnl / deposit) * 100;
+}
+
+// Absolute PnL value via the explicit formula. Mirrors /home/ubuntu/meridian/scripts/lib/pnl.cjs.
+//   PnL = (balances + withdrawals + claimable + claimed) - deposits
+// USD: exact match vs Meteora per-position pnlUsd. SOL: small drift expected.
+function deriveOpenPnlValue(binData, solMode = false) {
+  if (!binData) return 0;
   const balances = solMode
     ? safeNum(binData.unrealizedPnl?.balancesSol)
     : safeNum(binData.unrealizedPnl?.balances);
   const unclaimedFees = solMode
     ? safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol)
     : safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd);
+  const unclaimedRewards = solMode
+    ? safeNum(binData.unrealizedPnl?.unclaimedRewardTokenX?.amountSol) + safeNum(binData.unrealizedPnl?.unclaimedRewardTokenY?.amountSol)
+    : safeNum(binData.unrealizedPnl?.unclaimedRewardTokenX?.usd) + safeNum(binData.unrealizedPnl?.unclaimedRewardTokenY?.usd);
   const withdrawals = solMode
     ? safeNum(binData.allTimeWithdrawals?.total?.sol)
     : safeNum(binData.allTimeWithdrawals?.total?.usd);
   const fees = solMode
     ? safeNum(binData.allTimeFees?.total?.sol)
     : safeNum(binData.allTimeFees?.total?.usd);
+  const deposit = solMode
+    ? safeNum(binData.allTimeDeposits?.total?.sol)
+    : safeNum(binData.allTimeDeposits?.total?.usd);
+  return balances + unclaimedFees + unclaimedRewards + withdrawals + fees - deposit;
+}
 
-  const pnl = balances + unclaimedFees + withdrawals + fees - deposit;
-  return (pnl / deposit) * 100;
+// Cross-check our explicit PnL vs Meteora's pre-computed value.
+// Logs a warning if the absolute delta exceeds `usdThreshold` (USD) or
+// `solThreshold` (SOL). Returns the delta for callers that want to act on it.
+function validateOpenPnlValue(binData, solMode = false, { usdThreshold = 0.5, solThreshold = 0.005 } = {}) {
+  if (!binData) return null;
+  const ours = deriveOpenPnlValue(binData, solMode);
+  const reported = solMode
+    ? safeNum(binData.pnlSol)
+    : safeNum(binData.pnlUsd);
+  const delta = ours - reported;
+  const threshold = solMode ? solThreshold : usdThreshold;
+  if (Math.abs(delta) > threshold) {
+    log(
+      "pnl_warn",
+      `${solMode ? "SOL" : "USD"} PnL delta ${delta.toFixed(solMode ? 6 : 2)} exceeds threshold (ours=${ours.toFixed(solMode ? 6 : 2)}, meteora=${reported.toFixed(solMode ? 6 : 2)})`,
+    );
+  }
+  return delta;
 }
 
 function deriveLpAgentPnlPct(lpData, solMode = false) {

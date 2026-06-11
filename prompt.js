@@ -133,7 +133,7 @@ DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
 - Use amount_y only, keep amount_x=0. For single-side SOL deploys, bins_above=0 — the upper bin pins to the active bin. Do NOT request upside exposure.
-- strategy: "spot" only. Fixed. Never use anything else.
+- strategy: "bid_ask" by default. Use "spot" only if strong directional conviction.
 - Bin steps must be [80-125].
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 

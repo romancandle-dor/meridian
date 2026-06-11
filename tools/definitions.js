@@ -129,7 +129,7 @@ Only call this if you need the current price to calculate a specific bin range (
       name: "deploy_position",
       description: `Open a new DLMM liquidity position.
 
-FIXED STRATEGY: Use "spot" only. Never use 'bid_ask', 'curve', 'mixed', 'hybrid', or 'multi_layer'.
+STRATEGY: Use "bid_ask" by default (safer, balanced). Only use "spot" if you have strong directional conviction. Never use 'curve', 'mixed', 'hybrid', or 'multi_layer'.
 
 HARD RULES:
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
@@ -163,8 +163,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           strategy: {
             type: "string",
-            enum: ["spot"],
-            description: "DLMM strategy type. Always use 'spot'."
+            enum: ["bid_ask", "spot"],
+            description: "DLMM strategy type. 'bid_ask' is safer default."
           },
           bins_below: {
             type: "number",
