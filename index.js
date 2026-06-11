@@ -1567,15 +1567,39 @@ async function telegramHandler(msg) {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
-        const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
-        const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
-        const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
-        const inRange = p.in_range ? "🟢" : "🔴OOR";
-        return ` ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} · ${val.padStart(8)} · ${pnl.padStart(7)} · ${fees.padStart(6)} · ${age.padStart(4)} · ${inRange}`;
+      const wib = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", hour12: false,
+      }).format(new Date());
+
+      const blocks = positions.map((p, i) => {
+        const num = `${i + 1}.`;
+        const val  = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
+        const pnl  = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+        const feesUsd = p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : p.unclaimed_fees_usd;
+        const fees = `$${(feesUsd ?? 0).toFixed(2)}`;
+        const age  = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
+        const status = p.in_range
+          ? "✅ hold"
+          : `⏰ OOR ${p.minutes_out_of_range ?? 0}m`;
+        const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
+        const numCol = num.padStart(3);
+        return `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  🏦 ${val.padStart(7)}  💰 ${fees.padStart(5)}  ${age.padStart(4)}  ${status}`;
       });
-      await sendMessage(`📊 Positions (${total_positions}):\n${"─".repeat(40)}\n${lines.join("\n")}\n${"─".repeat(40)}\n/close <n> · /set <n> <note>`);
+
+      const totalValue = positions.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
+      const totalFeesUsd = positions.reduce((s, p) => s + (
+        p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : (p.unclaimed_fees_usd ?? 0)
+      ), 0);
+
+      await sendMessage([
+        `📊 positions  ·  ${wib} WIB  ·  ${total_positions} open`,
+        "",
+        ...blocks,
+        "",
+        `  🏦  ${cur}${totalValue.toFixed(2)}  ·  💰  $${totalFeesUsd.toFixed(2)}`,
+        "",
+        "/close <n> · /set <n> <note>",
+      ].join("\n"));
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
