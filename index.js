@@ -321,7 +321,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
       // Number column pads to 2 chars so 1-9 align and 10+ still readable (rare)
       const numCol = num.padStart(3);
-      let b = `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  ${val.padStart(8)}  fees ${fees.padStart(6)}  ${age.padStart(4)}  ${status}`;
+      let b = `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  bank ${val.padStart(7)}  uang ${fees.padStart(5)}  ${age.padStart(4)}  ${status}`;
       if (p.instruction) b += `\n      📝 "${p.instruction}"`;
       if (act.action === "CLOSE" && act.reason && act.rule !== "exit") b += `\n      reason: ${act.reason}`;
       return b;
@@ -377,7 +377,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       "",
       ...blocks,
       "",
-      `  Total  ${cur}${totalValue.toFixed(2)}  ·  Fees  ${cur}${totalUnclaimed.toFixed(2)}  ·  ${actionSummary}`,
+      `  bank  ${cur}${totalValue.toFixed(2)}  ·  uang  ${cur}${totalUnclaimed.toFixed(2)}  ·  ${actionSummary}`,
     ].join("\n");
 
     // ── Call LLM only if action needed ──────────────────────────────
