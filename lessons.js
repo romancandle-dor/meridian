@@ -336,8 +336,9 @@ export function evolveThresholds(perfData, config) {
   const winners = perfData.filter((p) => p.pnl_pct > 0);
   const losers  = perfData.filter((p) => p.pnl_pct < -5);
 
-  // Need at least some signal in both directions before adjusting
-  const hasSignal = winners.length >= 2 || losers.length >= 2;
+  // Need BOTH winners and losers to extract directional signal — one-sided
+  // data overfits (e.g. 4 winners → no evidence to raise anything).
+  const hasSignal = winners.length >= 3 && losers.length >= 3;
   if (!hasSignal) return null;
 
   const changes   = {};

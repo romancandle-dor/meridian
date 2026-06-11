@@ -129,19 +129,15 @@ Only call this if you need the current price to calculate a specific bin range (
       name: "deploy_position",
       description: `Open a new DLMM liquidity position.
 
-PRIORITY ORDER for strategy and bins:
-1. User explicitly specifies → always follow exactly (user override is absolute)
-2. No user spec → use the configured strategy from config.strategy.strategy and choose bins based on volatility
+FIXED STRATEGY: Use "spot" only. Never use 'bid_ask', 'curve', 'mixed', 'hybrid', or 'multi_layer'.
 
 HARD RULES:
-- Never use 'curve'.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
 - Range: Never deploy a tiny range. Total bins must be at least the configured minimum, with a hard floor of 35 bins.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
 
-Guidelines (only when user hasn't specified):
-- Strategy: omit the strategy field — the system will use the configured default from config.strategy.strategy
+Guidelines:
 - Bins: choose from configured minBinsBelow/maxBinsBelow by positive volatility. The hard lower floor is 35 bins.
 - Deposit: single-sided SOL only: set amount_y/amount_sol, keep amount_x=0.
 
@@ -167,8 +163,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           strategy: {
             type: "string",
-            enum: ["bid_ask", "spot"],
-            description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise omit — the system default from config.strategy.strategy will be used automatically."
+            enum: ["spot"],
+            description: "DLMM strategy type. Always use 'spot'."
           },
           bins_below: {
             type: "number",
@@ -376,7 +372,32 @@ WARNING: This executes a real on-chain transaction.`,
   },
 
   // ═══════════════════════════════════════════
-  //  LEARNING TOOLS
+  //  ADDITIONAL LP TOOLS
+  // ═══════════════════════════════════════════
+  {
+    type: "function",
+    function: {
+      name: "add_liquidity_to_position",
+      description: `Add SOL liquidity to an existing position with a specific strategy (for hybrid/multi-layer deploys).
+Use after initial deploy to add spot liquidity on top of bid_ask, or vice versa. The position must already exist.
+
+Example use case:
+- First deploy with bid_ask (edges) — creates the position
+- Then add_liquidity_to_position with spot (middle) — fills the gap for hybrid exposure
+
+WARNING: This executes a real on-chain transaction.`,
+      parameters: {
+        type: "object",
+        properties: {
+          position_address: { type: "string", description: "The position public key to add liquidity to" },
+          amount_sol: { type: "number", description: "Amount of SOL to add (e.g., 1.5)" },
+          strategy: { type: "string", enum: ["spot", "bid_ask", "curve", "mixed"], description: "Liquidity distribution strategy. Use 'spot' for concentrated middle, 'bid_ask' for edges, 'curve' for gradual distribution, 'mixed' for multi-layer distribution." },
+        },
+        required: ["position_address", "amount_sol", "strategy"]
+      }
+    }
+  },
+
   // ═══════════════════════════════════════════
   {
     type: "function",
@@ -543,7 +564,7 @@ is_pool=true means it's a liquidity pool address, not a real holder — filter t
 
 Also returns global_fees_sol — total priority/jito tips paid by ALL traders on this token (NOT Meteora LP fees).
 This is a key signal: low global_fees_sol means transactions are bundled or the token is a scam.
-HARD GATE: if global_fees_sol < config.screening.minTokenFeesSol (default 30), do NOT deploy.
+HARD GATE: if global_fees_sol < config.screening.minTokenFeesSol, do NOT deploy. The actual threshold is the LIVE config value at runtime (currently 20 SOL per user-config.json) — IGNORE the "default 30" wording below; that was the historical default before the user override.
 
 NOTE: Requires mint address. If you only have a symbol/name, call get_token_info first to resolve the mint.`,
       parameters: {

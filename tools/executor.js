@@ -2,6 +2,7 @@ import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
+  addLiquidityToPosition,
   getMyPositions,
   getWalletPositions,
   getPositionPnl,
@@ -9,7 +10,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken } from "./wallet.js";
+import { getWalletBalances, swapToken, getConnection, getWallet } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
@@ -133,18 +134,22 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
-  if (
-    minFeeActiveTvlRatio != null &&
-    minFeeActiveTvlRatio > 0 &&
-    (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
-  ) {
-    return {
-      pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
-    };
-  }
+  // DISABLED: Meteora fee_active_tvl_ratio unreliable (returns 0 for many pools).
+      // Screening already applies config filters; safety check causes false positives.
+      /*
+      const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+      const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+      if (
+        minFeeActiveTvlRatio != null &&
+        minFeeActiveTvlRatio > 0 &&
+        (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
+      ) {
+        return {
+          pass: false,
+          reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+        };
+      }
+      */
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
   let volatilityDetail = detail;
@@ -164,6 +169,13 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
+    };
+  }
+  const maxVol = numberOrNull(config.screening.maxVolatility);
+  if (maxVol != null && volatility > maxVol) {
+    return {
+      pass: false,
+      reason: `Pool ${volatilityTimeframe} volatility ${volatility} exceeds maxVolatility ${maxVol}. Refusing deploy.`,
     };
   }
 
@@ -205,7 +217,29 @@ const toolMap = {
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
   get_active_bin: getActiveBin,
-  deploy_position: deployPosition,
+  deploy_position: async (args) => {
+    const isHybrid = args.strategy === "hybrid" || args.strategy === "mixed" || args.strategy === "multi_layer";
+    if (isHybrid && args.strategy !== "bid_ask" && args.strategy !== "spot") {
+      const totalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
+      const bidAskAmount = Math.round(totalAmount * 0.7 * 10000) / 10000;
+      const spotAmount = Math.round(totalAmount * 0.3 * 10000) / 10000;
+      const bidAskArgs = { ...args, strategy: "bid_ask", amount_y: bidAskAmount, amount_sol: bidAskAmount };
+      const result = await deployPosition(bidAskArgs);
+      if (result?.success && result?.position && spotAmount > 0.01) {
+        try {
+          const addResult = await addLiquidityToPosition({ position_address: result.position, amount_sol: spotAmount, strategy: "spot" });
+          result.spot_add = addResult;
+          result.hybrid = true;
+          result.amount_y = totalAmount;
+          result.amount_sol = totalAmount;
+        } catch (e) {
+          result.spot_add = { success: false, error: e.message };
+        }
+      }
+      return result;
+    }
+    return deployPosition(args);
+  },
   get_my_positions: getMyPositions,
   get_wallet_positions: getWalletPositions,
   search_pools: searchPools,
@@ -220,6 +254,7 @@ const toolMap = {
   close_position: closePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
+  add_liquidity_to_position: addLiquidityToPosition,
   get_top_lpers: studyTopLPers,
   study_top_lpers: studyTopLPers,
   set_position_note: ({ position_address, instruction }) => {
@@ -320,16 +355,19 @@ const toolMap = {
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
+      maxVolatility: ["screening", "maxVolatility"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
+      useGmgnSource: ["screening", "useGmgnSource"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      outOfRangeRightWaitMinutes: ["management", "outOfRangeRightWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
@@ -436,6 +474,9 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      // timing entry
+      timingEntryEnabled: ["timingEntry", "enabled"],
+      minDumpPct: ["timingEntry", "minDumpPct"],
     };
 
     const applied = {};
@@ -477,6 +518,8 @@ const toolMap = {
     }
 
     // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
+    // DISABLED: breaks user-config.json overrides. Use manual scaling instead.
+    /*
     if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
       const tf = normalizeTimeframe(applied.timeframe);
       applied.timeframe = tf;
@@ -486,6 +529,7 @@ const toolMap = {
       applied._timeframeScaled = true;
       log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
     }
+    */
 
     // Apply to live config immediately
     for (const [key, val] of Object.entries(applied)) {
@@ -649,6 +693,24 @@ export async function executeTool(name, args) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        if (result.success && result.position && result.pool) {
+          (async () => {
+            try {
+              await new Promise(r => setTimeout(r, 30000));
+              const pnl = await getPositionPnl({ pool_address: result.pool, position_address: result.position });
+              const pnlPct = Number(pnl?.pnl_pct ?? 0);
+              const currentValue = Number(pnl?.current_value_usd ?? 0);
+              if (pnlPct < -5 && pnlPct > -99) {
+                log("deploy", `Post-deploy validation: PnL ${pnlPct}% < -5% — bad position state, auto-closing`);
+                await closePosition({ position_address: result.position, reason: "post_deploy_failed" });
+              } else if (pnlPct <= -99) {
+                log("deploy", `Post-deploy PnL ${pnlPct}% — position not yet indexed by API, skipping auto-close`);
+              }
+            } catch (e) {
+              log("deploy", `Post-deploy PnL check failed: ${e.message}`);
+            }
+          })();
+        }
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
@@ -657,16 +719,60 @@ export async function executeTool(name, args) {
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
         // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
+        const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
+        if (!args.skip_swap && result.base_mint && result.base_mint !== WRAPPED_SOL_MINT) {
           try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
+            let tokenBalance = null;
+            // Try Helius first (fast path), retry with delay for indexing lag
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const balances = await getWalletBalances({});
+              if (balances.error) {
+                if (attempt < 2) { await new Promise(r => setTimeout(r, 2000)); continue; }
+                break;
+              }
+              const t = balances.tokens?.find(t => t.mint === result.base_mint);
+              if (t && t.balance > 0) { tokenBalance = t.balance; break; }
+              if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+            }
+            // Fallback: direct RPC token account balance if Helius failed
+            if (tokenBalance === null) {
+              const walletAddress = getWallet().publicKey.toString();
+              const rpcUrl = process.env.RPC_URL || config.rpcUrl;
+              const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
+              for (const progId of TOKEN_PROGRAMS) {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                  try {
+                    const res = await fetch(rpcUrl, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        jsonrpc: "2.0", id: 1,
+                        method: "getTokenAccountsByOwner",
+                        params: [walletAddress, { mint: result.base_mint, programId: progId }, { encoding: "jsonParsed" }]
+                      })
+                    });
+                    const data = await res.json();
+                    const accounts = data?.result?.value || [];
+                    if (accounts.length > 0) {
+                      const parsed = accounts[0].account?.data?.parsed?.info?.tokenAmount;
+                      if (parsed && parseFloat(parsed.uiAmount) > 0) {
+                        tokenBalance = parseFloat(parsed.uiAmount);
+                        break;
+                      }
+                    }
+                  } catch (rpcErr) {
+                    log("executor_warn", `Auto-swap RPC fallback attempt ${attempt + 1}/3: ${rpcErr.message}`);
+                  }
+                  if (tokenBalance === null && attempt < 2) await new Promise(r => setTimeout(r, 2000));
+                }
+                if (tokenBalance !== null) break;
+              }
+            }
+            if (tokenBalance !== null && tokenBalance > 0) {
+              log("executor", `Auto-swapping ${result.base_mint.slice(0, 8)} (${tokenBalance}) back to SOL`);
+              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: tokenBalance });
               result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+              result.auto_swap_note = `Base token already auto-swapped back to SOL. Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
             }
           } catch (e) {
@@ -675,11 +781,43 @@ export async function executeTool(name, args) {
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
-          const balances = await getWalletBalances({});
-          const token = balances.tokens?.find(t => t.mint === result.base_mint);
-          if (token && token.usd >= 0.10) {
-            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+          let tokenBalance = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const balances = await getWalletBalances({});
+            if (balances.error) {
+              if (attempt === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
+              break;
+            }
+            const t = balances.tokens?.find(t => t.mint === result.base_mint);
+            if (t && t.balance > 0) { tokenBalance = t.balance; break; }
+            break;
+          }
+          if (tokenBalance === null) {
+            try {
+              const { PublicKey } = await import("@solana/web3.js");
+              const conn = getConnection();
+              const wallet = getWallet();
+              const mintPubkey = new PublicKey(result.base_mint);
+              const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
+              for (const progId of TOKEN_PROGRAMS) {
+                try {
+                  const accounts = await conn.getTokenAccountsByOwner(wallet.publicKey, { mint: mintPubkey, programId: new PublicKey(progId) });
+                  if (accounts.value.length > 0) {
+                    const parsed = accounts.value[0].account.data?.parsed?.info?.tokenAmount;
+                    if (parsed && parseFloat(parsed.uiAmount) > 0) {
+                      tokenBalance = parseFloat(parsed.uiAmount);
+                      break;
+                    }
+                  }
+                } catch (_) {}
+              }
+            } catch (rpcErr) {
+              log("executor_warn", `Auto-swap RPC fallback after claim failed: ${rpcErr.message}`);
+            }
+          }
+          if (tokenBalance !== null && tokenBalance > 0) {
+            log("executor", `Auto-swapping claimed ${result.base_mint.slice(0, 8)} (${tokenBalance}) back to SOL`);
+            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: tokenBalance });
           }
         } catch (e) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
@@ -775,17 +913,6 @@ async function runSafetyChecks(name, args) {
           reason: `bins_below ${args.bins_below ?? "missing"} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
         };
       }
-      if (
-        isSingleSidedSol &&
-        args.upside_pct == null &&
-        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove !== 0)
-      ) {
-        return {
-          pass: false,
-          reason: "Single-side SOL deploy must use bins_above=0.",
-        };
-      }
-
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {
@@ -837,6 +964,14 @@ async function runSafetyChecks(name, args) {
         return {
           pass: false,
           reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
+        };
+      }
+      // Hard cap: enforce deployAmountSol as absolute ceiling (prevent LLM override)
+      const maxAllowed = config.management.deployAmountSol;
+      if (amountY > maxAllowed) {
+        return {
+          pass: false,
+          reason: `Amount ${amountY} SOL exceeds configured deployAmountSol (${maxAllowed} SOL). LLM cannot override.`,
         };
       }
 

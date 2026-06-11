@@ -398,10 +398,12 @@ export function getStateSummary() {
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin, volatility: passedVolatility } = positionData;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
+  // Volatility: prefer passed-in, fall back to state-tracked, default 5 (mid-vol)
+  const candidateVolatility = passedVolatility ?? pos.volatility ?? 5;
 
   if (pos.confirmed_trailing_exit_until) {
     if (new Date(pos.confirmed_trailing_exit_until).getTime() > Date.now() && pos.confirmed_trailing_exit_reason) {
@@ -463,7 +465,39 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // ── Out of range too long ──────────────────────────────────────
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
+    const isRightOor = active_bin != null && upper_bin != null && active_bin > upper_bin;
+    const isLeftOor  = active_bin != null && lower_bin != null && active_bin < lower_bin;
+
+    // OOR right: Rule 3 in index.js handles it. Skip here to avoid duplicate.
+    if (isRightOor) return null;
+
+    if (isLeftOor) {
+      const leftWaitCfg = mgmtConfig.outOfRangeLeftWaitMinutes ?? 120;
+      // Token-aware: "auto" scales by volatility. Low vol → longer hold (12h),
+      // high vol → shorter (4h). "right tokens" (low vol) get more time to recover.
+      const leftWait = (leftWaitCfg === "auto" || leftWaitCfg === null)
+        ? Math.max(240, Math.min(720, Math.round(720 - (candidateVolatility ?? 5) * 60)))
+        : Math.max(0, Math.round(leftWaitCfg));
+      const onlyAtProfit = mgmtConfig.closeLeftOorOnlyAtProfit ?? true;
+
+      // Still within the wait window — hold and monitor.
+      if (minutesOOR < leftWait) return null;
+
+      // Past the wait window. If "only at profit" is on, require pnl > 0 to close.
+      if (onlyAtProfit && (currentPnlPct == null || currentPnlPct <= 0)) {
+        return null;
+      }
+
+      return {
+        action: "OUT_OF_RANGE",
+        reason: `OOR_left ${minutesOOR}m (limit: ${leftWait}m)${currentPnlPct != null ? `, pnl ${currentPnlPct.toFixed(2)}%` : ""}`,
+      };
+    }
+
+    // Direction unknown (legacy or bin data missing) — fall back to the old single-timer.
+    // Wait for breakeven before closing at a loss
     if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
+      if (currentPnlPct != null && currentPnlPct < 0) return null;
       return {
         action: "OUT_OF_RANGE",
         reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
@@ -480,6 +514,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
     (age_minutes == null || age_minutes >= minAgeForYieldCheck)
   ) {
+    if (currentPnlPct != null && currentPnlPct < 0) return null;
     return {
       action: "LOW_YIELD",
       reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
@@ -512,7 +547,7 @@ export function setLastBriefingDate() {
  * Reconcile local state with actual on-chain positions.
  * Marks any local open positions as closed if they are not in the on-chain list.
  */
-const SYNC_GRACE_MS = 5 * 60_000; // don't auto-close positions deployed < 5 min ago
+const SYNC_GRACE_MS = 15 * 60_000; // don't auto-close positions deployed < 15 min ago (Meteora API drops OOR positions)
 
 export function syncOpenPositions(active_addresses) {
   const state = load();

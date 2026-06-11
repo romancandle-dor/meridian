@@ -108,6 +108,7 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    useGmgnSource:      u.useGmgnSource      ?? false, // use GMGN trending instead of Meteora pool discovery
   },
 
   gmgn: {
@@ -171,6 +172,9 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeLeftWaitMinutes: u.outOfRangeLeftWaitMinutes ?? 120,
+    outOfRangeRightWaitMinutes: u.outOfRangeRightWaitMinutes ?? 30,
+    closeLeftOorOnlyAtProfit: u.closeLeftOorOnlyAtProfit ?? true,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -179,12 +183,13 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossPct:           u.stopLossPct !== undefined ? u.stopLossPct : -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
+    binsAbove:             u.binsAbove             ?? "auto",
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
     // Trailing take-profit
@@ -194,6 +199,14 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
+  },
+
+  // ─── Timing Entry (dump filter) ─────────
+  timingEntry: {
+    enabled:       u.timingEntry?.enabled       ?? false,
+    minDumpPct:    u.timingEntry?.minDumpPct    ?? -5,
+    checkField:    u.timingEntry?.checkField    ?? "price_change_1h",
+    maxAgeMinutes: u.timingEntry?.maxAgeMinutes ?? 120,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -295,7 +308,7 @@ export function computeDeployAmount(walletSol) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
-  const ceil     = config.risk.maxDeployAmount;
+  const ceil     = config.management.deployAmountSol;
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));

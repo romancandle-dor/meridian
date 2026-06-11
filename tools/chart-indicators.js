@@ -37,6 +37,8 @@ function buildSignalSummary(payload) {
   return {
     close: safeNum(candle.close),
     previousClose: safeNum(previousCandle.close),
+    volume: safeNum(candle.volume),
+    previousVolume: safeNum(previousCandle.volume),
     rsi,
     lowerBand: safeNum(bollinger.lower),
     middleBand: safeNum(bollinger.middle),
@@ -185,6 +187,14 @@ function evaluatePreset(side, preset, payload) {
             reason: "Price reclaimed a key Fibonacci level upward",
             signal: summary,
           };
+    case "volume_spike":
+      return {
+        confirmed: summary.volume > 0 && summary.volume > (summary.previousVolume || 0) * 2 && summary.close > 0,
+        reason: summary.volume > 0
+          ? `Volume ${summary.volume} vs previous ${summary.previousVolume || 0} (${summary.previousVolume > 0 ? ((summary.volume / summary.previousVolume - 1) * 100).toFixed(0) : "inf"}% spike)`
+          : "No volume data",
+        signal: summary,
+      };
     case "fibo_reject":
       return side === "entry"
         ? {
