@@ -286,29 +286,36 @@ export async function runManagementCycle({ silent = false } = {}) {
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
+    const cur = config.management.solMode ? "◎" : "$";
 
-    const reportLines = positionData.map((p) => {
+    const blocks = positionData.map((p, i) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      return line;
+      const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`.padStart(12);
+      const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%`.padStart(8) : "   ????";
+      const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`.padStart(10);
+      const age     = p.age_minutes != null ? `${p.age_minutes}m`.padStart(6) : "    ?";
+      const inRange = p.in_range ? "IN" : "OOR";
+      const oor     = !p.in_range && p.minutes_out_of_range != null ? ` ${p.minutes_out_of_range}m` : "";
+      const badge   = act.action === "INSTRUCTION" ? "📋EVAL" : act.action === "CLOSE" ? "❌CLOSE" : act.action === "CLAIM" ? "💰CLAIM" : "✅STAY";
+      let b = `  ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} ${val} ${pnl} ${fees} ${age} ${inRange}${oor} ${badge}`;
+      if (p.instruction) b += `\n     📝 "${p.instruction}"`;
+      if (act.action === "CLOSE" && act.reason) b += `\n     ⚡ ${act.reason}`;
+      return b;
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
-      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
-      : "no action";
+      ? needsAction.map(a => a.action === "INSTRUCTION" ? "📋EVAL instruction" : `${a.action === "CLOSE" ? "❌CLOSE" : "💰CLAIM"}${a.reason ? `: ${a.reason}` : ""}`).join(" · ")
+      : "✅ all STAY";
 
-    const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    const line = "─".repeat(48);
+    mgmtReport = [
+      `📊 Management: ${positions.length} position(s)`,
+      line,
+      ...blocks,
+      line,
+      `  💰 ${cur}${totalValue.toFixed(2)} total  ·  🏦 ${cur}${totalUnclaimed.toFixed(2)} fees  ·  ${actionSummary}`,
+    ].join("\n");
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -317,17 +324,17 @@ export async function runManagementCycle({ silent = false } = {}) {
     });
 
     if (actionPositions.length > 0) {
-      log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
+      log("cron", `Management: ${actionPositions.length} tindakan dibutuhake — nimbali LLM [model: ${config.llm.managementModel}]`);
 
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
         return [
-          `POSITION: ${p.pair} (${p.position})`,
-          `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
-          `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
-          `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
-          p.instruction ? `  instruction: "${p.instruction}"` : null,
+          `POSISI: ${p.pair} (${p.position})`,
+          `  kolam: ${p.pool}`,
+          `  tumindak: ${act.action}${act.rule && act.rule !== "exit" ? ` — Aturan ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  pnl_pct: ${p.pnl_pct}% | biaya_nganti_diklaim: ${cur}${p.unclaimed_fees_usd} | regane: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+          `  bins: ngisor=${p.lower_bin} ndhuwur=${p.upper_bin} aktif=${p.active_bin} | oor_menit: ${p.minutes_out_of_range ?? 0}`,
+          p.instruction ? `  instruksi: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
 
@@ -351,7 +358,7 @@ After executing, write a brief one-line result per position.
 
       mgmtReport += `\n\n${content}`;
     } else {
-      log("cron", "Management: all positions STAY — skipping LLM");
+      log("cron", "Management: kabeh posisi STAY — skip LLM");
       // Per-position PnL snapshot for cross-check vs pnl_warn (formula vs Meteora).
       for (const p of positionData) {
         const cur = config.management.solMode ? "◎" : "$";
@@ -363,10 +370,10 @@ After executing, write a brief one-line result per position.
           : (Math.abs(delta) > 0.5 ? " ⚠️" : " ✓");
         log(
           "pnl_snapshot",
-          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, derived ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | delta ${delta.toFixed(4)}${flag}`,
+          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, asil rumus ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | bedane ${delta.toFixed(4)}${flag}`,
         );
       }
-      await liveMessage?.note("No tool actions needed.");
+      await liveMessage?.note("Ora ana tindakan sing dibutuhake.");
     }
 
     // Trigger screening after management
@@ -1496,12 +1503,15 @@ async function telegramHandler(msg) {
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
       const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`.padStart(10);
+        const pnlRaw   = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "   ????";
+        const pnl     = pnlRaw.padStart(7);
+        const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`.padStart(8);
+        const age     = p.age_minutes != null ? `${p.age_minutes}m`.padStart(5) : "   ?";
+        const oor     = !p.in_range ? " OOR" : "   ";
+        return `  ${i + 1}. ${p.pair.slice(0, 10).padEnd(10)} ${val} ${pnl} ${fees} ${age}${oor}`;
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await sendMessage(`📊 Positions (${total_positions}):\n${"─".repeat(48)}\n${lines.join("\n")}\n${"─".repeat(48)}\n/close <n> · /set <n> <note>`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
