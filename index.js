@@ -339,30 +339,30 @@ export async function runManagementCycle({ silent = false } = {}) {
           return a.action;
         }).join(" · ")
       : hasOor
-        ? "😵 some wobbling"
+        ? "😵 wobbly"
         : totalPnl > 0
-          ? "😺 all purring"
+          ? "😺 all good"
           : totalPnl < 0
-            ? "🫠 holding the dip"
-            : "🌙 vibing";
+            ? "🫠 in the red"
+            : "🌙 flat";
 
     // Header mood emoji + tagline based on portfolio state
     let headerEmoji, headerTag;
     if (needsAction.length > 0) {
       headerEmoji = "🛎️";
-      headerTag = "hustle time";
+      headerTag = "action time";
     } else if (hasOor) {
       headerEmoji = "😵";
-      headerTag = "wobbling a bit";
+      headerTag = "wobbly";
     } else if (totalPnl > 0) {
       headerEmoji = "😺";
-      headerTag = "purring";
+      headerTag = "looking good";
     } else if (totalPnl < 0) {
       headerEmoji = "🫠";
-      headerTag = "holding the dip";
+      headerTag = "in the red";
     } else {
       headerEmoji = "🌙";
-      headerTag = "vibing";
+      headerTag = "flat";
     }
 
     // WIB = Asia/Jakarta (UTC+7). Format HH:MM.
