@@ -9,6 +9,8 @@ node_modules/
 
 # User config (contains RPC URL, wallet key, API keys)
 user-config.json
+
+# GMGN fee-source config (contains API key)
 gmgn-config.json
 
 # Stray Claude Code worktrees
@@ -33,7 +35,15 @@ logs/
 
 # Dev context
 context.md
+CONTEXT.md
+dev-blocklist.json
 docs/
 
-# Test files
-test-*.js
+# Discord listener queue
+discord-signals.json
+
+# Playwright MCP browser logs
+.playwright-mcp/
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock

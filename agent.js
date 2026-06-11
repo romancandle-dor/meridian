@@ -5,7 +5,7 @@ import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
 const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance"]);
-const SCREENER_TOOLS = new Set(["deploy_position", "add_liquidity_to_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
+const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "self_update",
   "update_config",
@@ -256,8 +256,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
       }
       const msg = response.choices[0].message;
-      // Repair malformed tool call JSON before pushing to history —
-      // the API rejects the next request if history contains invalid JSON args
+      const invalidToolArgErrors = new Map();
+      // Keep tool-call history API-valid, but never execute unrecoverable args.
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
           if (tc.function?.arguments) {
@@ -269,7 +269,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
                 log("warn", `Repaired malformed JSON args for ${tc.function.name}`);
               } catch {
                 tc.function.arguments = "{}";
-                log("error", `Could not repair JSON args for ${tc.function.name} — cleared to {}`);
+                const error = `Invalid tool arguments for ${tc.function.name}`;
+                invalidToolArgErrors.set(tc.id, error);
+                log("error", `${error}: could not repair JSON`);
               }
             }
           }
@@ -314,6 +316,20 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         const functionName = toolCall.function.name.replace(/<.*$/, "").trim();
         let functionArgs;
 
+        if (invalidToolArgErrors.has(toolCall.id)) {
+          const result = {
+            success: false,
+            error: invalidToolArgErrors.get(toolCall.id),
+            blocked: true,
+          };
+          await onToolFinish?.({ name: functionName, args: {}, result, success: false, step });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result),
+          };
+        }
+
         try {
           functionArgs = JSON.parse(toolCall.function.arguments);
         } catch {
@@ -322,7 +338,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             log("warn", `Repaired malformed JSON args for ${functionName}`);
           } catch (parseError) {
             log("error", `Failed to parse args for ${functionName}: ${parseError.message}`);
-            functionArgs = {};
+            const result = {
+              success: false,
+              error: `Invalid tool arguments for ${functionName}`,
+              blocked: true,
+            };
+            await onToolFinish?.({ name: functionName, args: {}, result, success: false, step });
+            return {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(result),
+            };
           }
         }
 
@@ -353,11 +379,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt ONLY if not blocked by safety check
-                // For close/swap: only lock on success so genuine failures can be retried
-                const isBlocked = result?.blocked === true;
-                if (NO_RETRY_TOOLS.has(functionName) && !isBlocked) firedOnce.add(functionName);
-                else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
+        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // For close/swap: only lock on success so genuine failures can be retried
+        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {
           role: "tool",

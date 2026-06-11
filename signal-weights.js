@@ -54,7 +54,7 @@ const CATEGORICAL_SIGNALS = new Set(["narrative_quality"]);
 
 // ─── Persistence ─────────────────────────────────────────────────
 
-export function loadWeights() {
+function loadWeights() {
   if (!fs.existsSync(WEIGHTS_FILE)) {
     const initial = {
       weights: { ...DEFAULT_WEIGHTS },
@@ -79,7 +79,7 @@ export function loadWeights() {
   }
 }
 
-export function saveWeights(data) {
+function saveWeights(data) {
   try {
     fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
   } catch (err) {

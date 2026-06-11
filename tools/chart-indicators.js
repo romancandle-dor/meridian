@@ -1,18 +1,10 @@
 import { config } from "../config.js";
 import { log } from "../logger.js";
+import { agentMeridianJson, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { safeNumber } from "../utils/number.js";
 
 const DEFAULT_INTERVALS = ["5_MINUTE"];
 const DEFAULT_CANDLES = 298;
-
-function getApiBase() {
-  return String(config.api.url || "https://api.agentmeridian.xyz/api").replace(/\/+$/, "");
-}
-
-function getHeaders() {
-  const headers = {};
-  if (config.api.publicApiKey) headers["x-api-key"] = config.api.publicApiKey;
-  return headers;
-}
 
 function normalizeIntervals(intervals) {
   const list = Array.isArray(intervals) ? intervals : DEFAULT_INTERVALS;
@@ -22,8 +14,7 @@ function normalizeIntervals(intervals) {
 }
 
 function safeNum(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  return safeNumber(value, null);
 }
 
 function buildSignalSummary(payload) {
@@ -37,8 +28,6 @@ function buildSignalSummary(payload) {
   return {
     close: safeNum(candle.close),
     previousClose: safeNum(previousCandle.close),
-    volume: safeNum(candle.volume),
-    previousVolume: safeNum(previousCandle.volume),
     rsi,
     lowerBand: safeNum(bollinger.lower),
     middleBand: safeNum(bollinger.middle),
@@ -187,14 +176,6 @@ function evaluatePreset(side, preset, payload) {
             reason: "Price reclaimed a key Fibonacci level upward",
             signal: summary,
           };
-    case "volume_spike":
-      return {
-        confirmed: summary.volume > 0 && summary.volume > (summary.previousVolume || 0) * 2 && summary.close > 0,
-        reason: summary.volume > 0
-          ? `Volume ${summary.volume} vs previous ${summary.previousVolume || 0} (${summary.previousVolume > 0 ? ((summary.volume / summary.previousVolume - 1) * 100).toFixed(0) : "inf"}% spike)`
-          : "No volume data",
-        signal: summary,
-      };
     case "fibo_reject":
       return side === "entry"
         ? {
@@ -221,7 +202,7 @@ function evaluatePreset(side, preset, payload) {
   }
 }
 
-export async function fetchChartIndicatorsForMint(
+async function fetchChartIndicatorsForMint(
   mint,
   {
     interval,
@@ -238,20 +219,9 @@ export async function fetchChartIndicatorsForMint(
   });
   if (refresh) search.set("refresh", "1");
 
-  const res = await fetch(`${getApiBase()}/chart-indicators/${mint}?${search.toString()}`, {
-    headers: getHeaders(),
+  return agentMeridianJson(`/chart-indicators/${mint}?${search.toString()}`, {
+    headers: getAgentMeridianHeaders(),
   });
-  const text = await res.text().catch(() => "");
-  let payload = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    payload = { raw: text };
-  }
-  if (!res.ok) {
-    throw new Error(payload?.error || `chart indicators ${res.status}`);
-  }
-  return payload;
 }
 
 export async function confirmIndicatorPreset({

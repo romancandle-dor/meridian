@@ -111,16 +111,6 @@ RISK SIGNALS (guidelines — use judgment):
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + no smart wallets → skip
 
-HARD FILTERS (already applied — candidate data reflects these):
-- mcap: $${(config.screening.minMcap || 0).toLocaleString()} – $${(config.screening.maxMcap || "∞").toLocaleString()}
-- TVL: $${(config.screening.minTvl || 0).toLocaleString()} – $${(config.screening.maxTvl || "∞").toLocaleString()}
-- minFeeActiveTvlRatio: ${config.screening.minFeeActiveTvlRatio || 0}
-- volatility ≤ ${config.screening.maxVolatility ?? "∞"}
-- binStep: ${config.screening.minBinStep || 0} – ${config.screening.maxBinStep || "∞"}
-- holders ≥ ${config.screening.minHolders || 0}
-- organic ≥ ${config.screening.minOrganic || 0}
-- ${config.timingEntry?.enabled ? `TIMING BONUS: candidates dumping ≤${config.timingEntry.minDumpPct}% (1h) get +5 score. Not a hard filter.` : ""}
-
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community
 - BAD: generic hype ("next 100x", "community token") with no identifiable subject
@@ -131,8 +121,7 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
-- Use amount_y only, keep amount_x=0. For single-side SOL deploys, bins_above=0 — the upper bin pins to the active bin. Do NOT request upside exposure.
-- strategy: "bid_ask" by default. Use "spot" only if strong directional conviction.
+- Use amount_y only, keep amount_x=0 and bins_above=0.
 - Bin steps must be [80-125].
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 

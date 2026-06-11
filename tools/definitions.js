@@ -1,4 +1,4 @@
-export const tools = [
+const toolDefinitions = [
   // ═══════════════════════════════════════════
   //  SCREENING TOOLS
   // ═══════════════════════════════════════════
@@ -51,11 +51,9 @@ Use this as the primary tool for finding new LP opportunities.`,
       description: `Get the top pre-scored pool candidates for deployment review.
 All filtering, scoring, and rule-checking is done in code — no analysis needed.
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
-Each pool includes a score (0-100) and has already passed hard disqualifiers, but this does not mean deployment is mandatory.
-If only one candidate is returned, deploy only when it is genuinely high conviction; otherwise skip the cycle.
-Use this instead of discover_pools for screening cycles. The active screening source is controlled by screeningSource:
-- meteora: legacy Meteora pool-discovery flow
-- gmgn: GMGN trending/security/holders/price-action first, then Meteora DLMM pool match.`,
+Each pool includes a score (0-100) and has already passed all hard disqualifiers.
+Use this instead of discover_pools for screening cycles.
+If this returns one candidate, still judge whether it is actually worth deploying; one weak candidate should be skipped.`,
       parameters: {
         type: "object",
         properties: {
@@ -129,15 +127,20 @@ Only call this if you need the current price to calculate a specific bin range (
       name: "deploy_position",
       description: `Open a new DLMM liquidity position.
 
-STRATEGY: Use "bid_ask" by default (safer, balanced). Only use "spot" if you have strong directional conviction. Never use 'curve', 'mixed', 'hybrid', or 'multi_layer'.
+PRIORITY ORDER for strategy and bins:
+1. User explicitly specifies → always follow exactly (user override is absolute)
+2. No user spec → use the configured strategy from config.strategy.strategy and choose bins based on volatility
 
 HARD RULES:
+- Never use 'curve'.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
-- Range: Never deploy a tiny range. Total bins must be at least the configured minimum, with a hard floor of 35 bins.
+- Volatility must be positive. If volatility is 0, null, or missing, do not deploy.
+- Range must cover at least 35 total bins. Never deploy 1-bin/tiny ranges.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
 
-Guidelines:
+Guidelines (only when user hasn't specified):
+- Strategy: omit the strategy field — the system will use the configured default from config.strategy.strategy
 - Bins: choose from configured minBinsBelow/maxBinsBelow by positive volatility. The hard lower floor is 35 bins.
 - Deposit: single-sided SOL only: set amount_y/amount_sol, keep amount_x=0.
 
@@ -155,7 +158,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           amount_x: {
             type: "number",
-            description: "Unsupported for this agent. Keep 0; deploys must be single-side SOL via amount_y/amount_sol."
+            description: "Unsupported for this agent. Keep at 0; deploys are single-side SOL via amount_y."
           },
           amount_sol: {
             type: "number",
@@ -164,7 +167,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           strategy: {
             type: "string",
             enum: ["bid_ask", "spot"],
-            description: "DLMM strategy type. 'bid_ask' is safer default."
+            description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise omit — the system default from config.strategy.strategy will be used automatically."
           },
           bins_below: {
             type: "number",
@@ -372,50 +375,22 @@ WARNING: This executes a real on-chain transaction.`,
   },
 
   // ═══════════════════════════════════════════
-  //  ADDITIONAL LP TOOLS
-  // ═══════════════════════════════════════════
-  {
-    type: "function",
-    function: {
-      name: "add_liquidity_to_position",
-      description: `Add SOL liquidity to an existing position with a specific strategy (for hybrid/multi-layer deploys).
-Use after initial deploy to add spot liquidity on top of bid_ask, or vice versa. The position must already exist.
-
-Example use case:
-- First deploy with bid_ask (edges) — creates the position
-- Then add_liquidity_to_position with spot (middle) — fills the gap for hybrid exposure
-
-WARNING: This executes a real on-chain transaction.`,
-      parameters: {
-        type: "object",
-        properties: {
-          position_address: { type: "string", description: "The position public key to add liquidity to" },
-          amount_sol: { type: "number", description: "Amount of SOL to add (e.g., 1.5)" },
-          strategy: { type: "string", enum: ["spot", "bid_ask", "curve", "mixed"], description: "Liquidity distribution strategy. Use 'spot' for concentrated middle, 'bid_ask' for edges, 'curve' for gradual distribution, 'mixed' for multi-layer distribution." },
-        },
-        required: ["position_address", "amount_sol", "strategy"]
-      }
-    }
-  },
-
+  //  LEARNING TOOLS
   // ═══════════════════════════════════════════
   {
     type: "function",
     function: {
       name: "update_config",
       description: `Update any of your operating parameters at runtime.
-Non-GMGN changes persist to user-config.json; GMGN tuning persists to gmgn-config.json. Changes take effect immediately — no restart needed.
+Changes persist to user-config.json and take effect immediately — no restart needed.
 
 VALID KEYS (use EXACTLY these key names, nothing else):
-Screening: screeningSource, minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, useDiscordSignals, discordSignalMode, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, allowedLaunchpads, blockedLaunchpads, minTokenAgeHours, maxTokenAgeHours, athFilterPct
-GMGN (persisted to gmgn-config.json): gmgnApiKey, gmgnBaseUrl, gmgnInterval, gmgnOrderBy, gmgnDirection, gmgnLimit, gmgnEnrichLimit, gmgnRequestDelayMs, gmgnMaxRetries, gmgnHoldersLimit, gmgnKlineResolution, gmgnKlineLookbackMinutes, gmgnFilters, gmgnPlatforms, gmgnMinMcap, gmgnMaxMcap, gmgnMinVolume, gmgnMinHolders, gmgnMinTokenAgeHours, gmgnMaxTokenAgeHours, gmgnAthFilterPct, gmgnMaxTop10HolderRate, gmgnMaxBundlerRate, gmgnMaxRatTraderRate, gmgnMaxFreshWalletRate, gmgnMaxDevTeamHoldRate, gmgnMaxBotDegenRate, gmgnMaxSniperCount, gmgnMaxSniperHoldRate, gmgnPreferredKolNames, gmgnPreferredKolMinHoldPct, gmgnDumpKolNames, gmgnDumpKolMinHoldPct, gmgnRequireKol, gmgnMinKolCount, gmgnMinSmartDegenCount, gmgnMinTotalFeeSol, gmgnIndicatorFilter, gmgnIndicatorInterval, gmgnRequireBullishSupertrend, gmgnRejectAlreadyAtBottom, gmgnRequireAboveSupertrend, gmgnMinRsi, gmgnMaxRsi, gmgnRequireBbPosition
-Management: minClaimAmount, autoSwapAfterClaim, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, takeProfitFeePct, trailingTakeProfit, trailingTriggerPct, trailingDropPct, pnlSanityMaxDiffPct, solMode, minSolToOpen, deployAmountSol, gasReserve, positionSizePct, minAgeBeforeYieldCheck
+Screening: minFeeActiveTvlRatio, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, allowedLaunchpads, blockedLaunchpads
+Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, minSolToOpen, deployAmountSol, gasReserve, positionSizePct
 Risk: maxPositions, maxDeployAmount
-Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
-Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
-Strategy: strategy, binsBelow, minBinsBelow, maxBinsBelow, defaultBinsBelow
-Hive/API: hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode, publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
-Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
+Schedule: managementIntervalMin, screeningIntervalMin
+Models: managementModel, screeningModel, generalModel
+Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
 
 Reason is optional but helpful — logged as a lesson when provided.`,
       parameters: {
@@ -564,7 +539,7 @@ is_pool=true means it's a liquidity pool address, not a real holder — filter t
 
 Also returns global_fees_sol — total priority/jito tips paid by ALL traders on this token (NOT Meteora LP fees).
 This is a key signal: low global_fees_sol means transactions are bundled or the token is a scam.
-HARD GATE: if global_fees_sol < config.screening.minTokenFeesSol, do NOT deploy. The actual threshold is the LIVE config value at runtime (currently 20 SOL per user-config.json) — IGNORE the "default 30" wording below; that was the historical default before the user override.
+HARD GATE: if global_fees_sol < config.screening.minTokenFeesSol (default 30), do NOT deploy.
 
 NOTE: Requires mint address. If you only have a symbol/name, call get_token_info first to resolve the mint.`,
       parameters: {
@@ -1137,3 +1112,13 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
     }
   },
 ];
+
+export const tools = toolDefinitions.map((tool) => ({
+  ...tool,
+  function: {
+    ...tool.function,
+    parameters: tool.function.parameters?.type === "object"
+      ? { additionalProperties: false, ...tool.function.parameters }
+      : tool.function.parameters,
+  },
+}));

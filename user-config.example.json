@@ -13,14 +13,7 @@
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
 
-  "strategy": "spot",
-
-  "timingEntry": {
-    "enabled": true,
-    "minDumpPct": -5,
-    "checkField": "price_change_1h",
-    "maxAgeMinutes": 120
-  },
+  "strategy": "bid_ask",
   "minBinsBelow": 35,
   "maxBinsBelow": 69,
   "defaultBinsBelow": 69,
@@ -50,7 +43,6 @@
   "blockedLaunchpads": [],
   "minTokenAgeHours": null,
   "maxTokenAgeHours": null,
-  "screeningSource": "meteora",
 
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
@@ -58,14 +50,8 @@
   "outOfRangeWaitMinutes": 30,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
-  "repeatDeployCooldownEnabled": true,
-  "repeatDeployCooldownTriggerCount": 3,
-  "repeatDeployCooldownHours": 12,
-  "repeatDeployCooldownScope": "token",
-  "repeatDeployCooldownMinFeeEarnedPct": 0,
   "minVolumeToRebalance": 1000,
   "stopLossPct": -50,
-  "emergencyPriceDropPct": -50,
   "takeProfitPct": 5,
   "minFeePerTvl24h": 7,
   "minAgeBeforeYieldCheck": 60,
@@ -106,6 +92,7 @@
   "pnlDepositCacheTtlSec": 300,
 
   "gmgnFeeSource": "gmgn",
+  "gmgnApiKey": "",
 
   "chartIndicators": {
     "enabled": false,

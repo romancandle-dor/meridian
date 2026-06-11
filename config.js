@@ -5,20 +5,14 @@ import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToT
 export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
 
-function readJsonIfExists(filePath) {
-  return fs.existsSync(filePath)
-    ? JSON.parse(fs.readFileSync(filePath, "utf8"))
-    : {};
-}
-
-const u = readJsonIfExists(USER_CONFIG_PATH);
-const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
+const u = fs.existsSync(USER_CONFIG_PATH)
+  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
+  : {};
 export const MIN_SAFE_BINS_BELOW = 35;
 
 function numericConfig(value) {
@@ -47,12 +41,18 @@ if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
-if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
-  process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
-}
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 
 const indicatorUserConfig = u.chartIndicators ?? {};
+
+// Optional standalone GMGN config file (mirrors user-config layering)
+const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const gmgnUserConfig = fs.existsSync(GMGN_CONFIG_PATH)
+  ? JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8"))
+  : {};
+if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
+  process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
+}
 
 function nonEmptyString(...values) {
   for (const value of values) {
@@ -61,16 +61,6 @@ function nonEmptyString(...values) {
     if (trimmed) return trimmed;
   }
   return null;
-}
-
-function gmgnValue(key, legacyKey, fallback) {
-  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
-}
-
-function gmgnArray(key, legacyKey, fallback) {
-  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
-  if (Array.isArray(u[legacyKey])) return u[legacyKey];
-  return fallback;
 }
 
 export const config = {
@@ -82,7 +72,6 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
-    source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
@@ -108,64 +97,6 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
-    useGmgnSource:      u.useGmgnSource      ?? false, // use GMGN trending instead of Meteora pool discovery
-  },
-
-  gmgn: {
-    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
-    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
-    // gmgn = use GMGN /v1/token/info total_fee for global_fees_sol (minTokenFeesSol gate); jupiter = legacy Jupiter fees
-    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
-    interval: gmgnValue("interval", "gmgnInterval", "5m"),
-    orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
-    direction: gmgnValue("direction", "gmgnDirection", "desc"),
-    limit: gmgnValue("limit", "gmgnLimit", 100),
-    enrichLimit: gmgnValue("enrichLimit", "gmgnEnrichLimit", 20),
-    requestDelayMs: gmgnValue("requestDelayMs", "gmgnRequestDelayMs", 350),
-    maxRetries: gmgnValue("maxRetries", "gmgnMaxRetries", 2),
-    holdersLimit: gmgnValue("holdersLimit", "gmgnHoldersLimit", 100),
-    klineResolution: gmgnValue("klineResolution", "gmgnKlineResolution", "5m"),
-    klineLookbackMinutes: gmgnValue("klineLookbackMinutes", "gmgnKlineLookbackMinutes", 60),
-    filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
-    platforms: gmgnArray("platforms", "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
-    minMcap: gmgnValue("minMcap", "gmgnMinMcap", u.minMcap ?? 150_000),
-    maxMcap: gmgnValue("maxMcap", "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
-    minTvl: gmgnValue("minTvl", "gmgnMinTvl", u.minTvl ?? 10_000),
-    minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
-    minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
-    minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
-    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
-    minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
-    requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
-    minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
-    maxRugRatio: gmgnValue("maxRugRatio", "gmgnMaxRugRatio", 0.3),
-    maxTop10HolderRate: gmgnValue("maxTop10HolderRate", "gmgnMaxTop10HolderRate", 0.5),
-    maxBundlerRate: gmgnValue("maxBundlerRate", "gmgnMaxBundlerRate", 0.5),
-    maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
-    maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
-    maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
-    preferredKolMinHoldPct: gmgnValue("preferredKolMinHoldPct", "gmgnPreferredKolMinHoldPct", 1),
-    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
-    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
-    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
-    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
-    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
-    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
-    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
-    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
-    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),
-    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
-    indicatorRules: (() => {
-      const r = gmgnUserConfig.indicatorRules || {};
-      return {
-        requireBullishSupertrend: r.requireBullishSupertrend ?? true,
-        rejectAlreadyAtBottom:    r.rejectAlreadyAtBottom    ?? true,
-        requireAboveSupertrend:   r.requireAboveSupertrend   ?? false,
-        minRsi:                   r.minRsi                   ?? null,
-        maxRsi:                   r.maxRsi                   ?? null,
-        requireBbPosition:        r.requireBbPosition        ?? null,
-      };
-    })(),
   },
 
   // ─── Position Management ────────────────
@@ -174,9 +105,6 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
-    outOfRangeLeftWaitMinutes: u.outOfRangeLeftWaitMinutes ?? 120,
-    outOfRangeRightWaitMinutes: u.outOfRangeRightWaitMinutes ?? 30,
-    closeLeftOorOnlyAtProfit: u.closeLeftOorOnlyAtProfit ?? true,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -185,13 +113,12 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct !== undefined ? u.stopLossPct : -50,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
-    binsAbove:             u.binsAbove             ?? "auto",
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
     // Trailing take-profit
@@ -201,14 +128,6 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
-  },
-
-  // ─── Timing Entry (dump filter) ─────────
-  timingEntry: {
-    enabled:       u.timingEntry?.enabled       ?? false,
-    minDumpPct:    u.timingEntry?.minDumpPct    ?? -5,
-    checkField:    u.timingEntry?.checkField    ?? "price_change_1h",
-    maxAgeMinutes: u.timingEntry?.maxAgeMinutes ?? 120,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -271,13 +190,27 @@ export const config = {
 
   // ─── PnL fetcher / poller (public infra: RPC + Meteora deposits + Jupiter) ──
   pnl: {
+    // Live position value comes from on-chain reads on this RPC.
+    // Defaults to the public pump.helius endpoint so the aggressive poller
+    // never burns the main RPC_URL or the LPAgent sponsor budget.
     rpcUrl: nonEmptyString(u.pnlRpcUrl, process.env.PNL_RPC_URL, "https://pump.helius-rpc.com"),
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
   },
 
+  // ─── GMGN (fee source for minTokenFeesSol gate) ──────────────
+  gmgn: {
+    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
+    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
+    requestDelayMs: Number(gmgnUserConfig.requestDelayMs ?? u.gmgnRequestDelayMs ?? 2500),
+    maxRetries: Number(gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2),
+    // gmgn = use GMGN total_fee for global_fees_sol; jupiter = legacy Jupiter fees
+    feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
+  },
+
   jupiter: {
+    // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
     apiKey: process.env.JUPITER_API_KEY ?? "",
     referralAccount:
       process.env.JUPITER_REFERRAL_ACCOUNT ??
@@ -318,7 +251,7 @@ export function computeDeployAmount(walletSol) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
-  const ceil     = config.management.deployAmountSol;
+  const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));
@@ -332,9 +265,9 @@ export function computeDeployAmount(walletSol) {
  */
 export function reloadScreeningThresholds() {
   try {
-    const fresh = readJsonIfExists(USER_CONFIG_PATH);
+    if (!fs.existsSync(USER_CONFIG_PATH)) return;
+    const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
     const s = config.screening;
-    if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
@@ -369,13 +302,5 @@ export function reloadScreeningThresholds() {
       config.strategy.minBinsBelow,
       Math.min(config.strategy.maxBinsBelow, Math.round(defaultBinsBelow)),
     );
-  } catch { /* ignore */ }
-  try {
-    const freshGmgn = readJsonIfExists(GMGN_CONFIG_PATH);
-    const g = config.gmgn;
-    for (const [key, value] of Object.entries(freshGmgn)) {
-      if (key in g && key !== "apiKey") g[key] = value;
-    }
-    if (freshGmgn.apiKey) g.apiKey = freshGmgn.apiKey;
   } catch { /* ignore */ }
 }

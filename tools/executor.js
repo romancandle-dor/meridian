@@ -2,7 +2,6 @@ import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
-  addLiquidityToPosition,
   getMyPositions,
   getWalletPositions,
   getPositionPnl,
@@ -10,7 +9,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken, getConnection, getWallet } from "./wallet.js";
+import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
@@ -29,7 +28,6 @@ import { REPO_ROOT, repoPath } from "../repo-root.js";
 import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {
@@ -43,23 +41,6 @@ const TIMEFRAME_MINUTES = {
 };
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
-
-const SENSITIVE_CONFIG_KEYS = new Set([
-  "gmgnApiKey",
-  "hiveMindApiKey",
-  "publicApiKey",
-]);
-
-function redactConfigValue(key, value) {
-  if (!SENSITIVE_CONFIG_KEYS.has(key)) return value;
-  return typeof value === "string" && value ? "***redacted***" : value;
-}
-
-function redactAppliedConfig(applied) {
-  return Object.fromEntries(
-    Object.entries(applied || {}).map(([key, value]) => [key, redactConfigValue(key, value)]),
-  );
-}
 
 function numberOrNull(value) {
   const n = Number(value);
@@ -133,22 +114,18 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  // DISABLED: Meteora fee_active_tvl_ratio unreliable (returns 0 for many pools).
-      // Screening already applies config filters; safety check causes false positives.
-      /*
-      const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-      const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
-      if (
-        minFeeActiveTvlRatio != null &&
-        minFeeActiveTvlRatio > 0 &&
-        (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
-      ) {
-        return {
-          pass: false,
-          reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
-        };
-      }
-      */
+  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  if (
+    minFeeActiveTvlRatio != null &&
+    minFeeActiveTvlRatio > 0 &&
+    (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
+  ) {
+    return {
+      pass: false,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+    };
+  }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
   let volatilityDetail = detail;
@@ -168,13 +145,6 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
-    };
-  }
-  const maxVol = numberOrNull(config.screening.maxVolatility);
-  if (maxVol != null && volatility > maxVol) {
-    return {
-      pass: false,
-      reason: `Pool ${volatilityTimeframe} volatility ${volatility} exceeds maxVolatility ${maxVol}. Refusing deploy.`,
     };
   }
 
@@ -209,6 +179,71 @@ async function validateDeployPoolThresholds(args) {
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
 
+function coerceBoolean(value, key) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  throw new Error(`${key} must be true or false`);
+}
+
+function coerceFiniteNumber(value, key) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) throw new Error(`${key} must be a finite number`);
+  return n;
+}
+
+function coerceString(value, key) {
+  if (typeof value !== "string") throw new Error(`${key} must be a string`);
+  return value.trim();
+}
+
+function coerceStringArray(value, key) {
+  if (!Array.isArray(value)) throw new Error(`${key} must be an array of strings`);
+  return value.map((entry) => coerceString(entry, key)).filter(Boolean);
+}
+
+function normalizeConfigValue(key, value) {
+  const booleanKeys = new Set([
+    "excludeHighSupplyConcentration",
+    "useDiscordSignals",
+    "avoidPvpSymbols",
+    "blockPvpSymbols",
+    "autoSwapAfterClaim",
+    "trailingTakeProfit",
+    "solMode",
+    "darwinEnabled",
+    "lpAgentRelayEnabled",
+  ]);
+  const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
+  const stringKeys = new Set([
+    "timeframe",
+    "category",
+    "discordSignalMode",
+    "strategy",
+    "managementModel",
+    "screeningModel",
+    "generalModel",
+    "hiveMindUrl",
+    "hiveMindApiKey",
+    "agentId",
+    "hiveMindPullMode",
+    "publicApiKey",
+    "agentMeridianApiUrl",
+    "pnlSource",
+    "pnlRpcUrl",
+    "gmgnFeeSource",
+    "gmgnApiKey",
+  ]);
+  if (value === null) return null;
+  if (booleanKeys.has(key)) return coerceBoolean(value, key);
+  if (arrayKeys.has(key)) return coerceStringArray(value, key);
+  if (stringKeys.has(key)) return coerceString(value, key);
+  return coerceFiniteNumber(value, key);
+}
+
 // Map tool names to implementations
 const toolMap = {
   discover_pools: discoverPools,
@@ -216,29 +251,7 @@ const toolMap = {
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
   get_active_bin: getActiveBin,
-  deploy_position: async (args) => {
-    const isHybrid = args.strategy === "hybrid" || args.strategy === "mixed" || args.strategy === "multi_layer";
-    if (isHybrid && args.strategy !== "bid_ask" && args.strategy !== "spot") {
-      const totalAmount = Number(args.amount_y ?? args.amount_sol ?? 0);
-      const bidAskAmount = Math.round(totalAmount * 0.7 * 10000) / 10000;
-      const spotAmount = Math.round(totalAmount * 0.3 * 10000) / 10000;
-      const bidAskArgs = { ...args, strategy: "bid_ask", amount_y: bidAskAmount, amount_sol: bidAskAmount };
-      const result = await deployPosition(bidAskArgs);
-      if (result?.success && result?.position && spotAmount > 0.01) {
-        try {
-          const addResult = await addLiquidityToPosition({ position_address: result.position, amount_sol: spotAmount, strategy: "spot" });
-          result.spot_add = addResult;
-          result.hybrid = true;
-          result.amount_y = totalAmount;
-          result.amount_sol = totalAmount;
-        } catch (e) {
-          result.spot_add = { success: false, error: e.message };
-        }
-      }
-      return result;
-    }
-    return deployPosition(args);
-  },
+  deploy_position: deployPosition,
   get_my_positions: getMyPositions,
   get_wallet_positions: getWalletPositions,
   search_pools: searchPools,
@@ -253,7 +266,6 @@ const toolMap = {
   close_position: closePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
-  add_liquidity_to_position: addLiquidityToPosition,
   get_top_lpers: studyTopLPers,
   study_top_lpers: studyTopLPers,
   set_position_note: ({ position_address, instruction }) => {
@@ -332,7 +344,6 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
-      screeningSource: ["screening", "source"],
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
@@ -354,19 +365,16 @@ const toolMap = {
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
-      maxVolatility: ["screening", "maxVolatility"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
-      useGmgnSource: ["screening", "useGmgnSource"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
-      outOfRangeRightWaitMinutes: ["management", "outOfRangeRightWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
@@ -403,8 +411,8 @@ const toolMap = {
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],
       // strategy
-      strategy:     ["strategy", "strategy"],
-      binsBelow:    ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
+      strategy: ["strategy", "strategy"],
+      binsBelow: ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
@@ -418,57 +426,13 @@ const toolMap = {
       agentMeridianApiUrl: ["api", "url"],
       lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
       // pnl fetcher / poller
-      pnlSource: ["pnl", "source"],
-      pnlRpcUrl: ["pnl", "rpcUrl"],
-      pnlPollIntervalSec: ["pnl", "pollIntervalSec"],
-      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec"],
-      // GMGN screening
-      gmgnFeeSource: ["gmgn", "feeSource"],
-      gmgnApiKey: ["gmgn", "apiKey"],
-      gmgnBaseUrl: ["gmgn", "baseUrl"],
-      gmgnInterval: ["gmgn", "interval"],
-      gmgnOrderBy: ["gmgn", "orderBy"],
-      gmgnDirection: ["gmgn", "direction"],
-      gmgnLimit: ["gmgn", "limit"],
-      gmgnEnrichLimit: ["gmgn", "enrichLimit"],
-      gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
-      gmgnMaxRetries: ["gmgn", "maxRetries"],
-      gmgnHoldersLimit: ["gmgn", "holdersLimit"],
-      gmgnKlineResolution: ["gmgn", "klineResolution"],
-      gmgnKlineLookbackMinutes: ["gmgn", "klineLookbackMinutes"],
-      gmgnFilters: ["gmgn", "filters"],
-      gmgnPlatforms: ["gmgn", "platforms"],
-      gmgnMinMcap: ["gmgn", "minMcap"],
-      gmgnMaxMcap: ["gmgn", "maxMcap"],
-      gmgnMinVolume: ["gmgn", "minVolume"],
-      gmgnMinHolders: ["gmgn", "minHolders"],
-      gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours"],
-      gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours"],
-      gmgnAthFilterPct: ["gmgn", "athFilterPct"],
-      gmgnMaxTop10HolderRate: ["gmgn", "maxTop10HolderRate"],
-      gmgnMaxBundlerRate: ["gmgn", "maxBundlerRate"],
-      gmgnMaxRatTraderRate: ["gmgn", "maxRatTraderRate"],
-      gmgnMaxFreshWalletRate: ["gmgn", "maxFreshWalletRate"],
-      gmgnMaxDevTeamHoldRate: ["gmgn", "maxDevTeamHoldRate"],
-      gmgnMaxBotDegenRate: ["gmgn", "maxBotDegenRate"],
-      gmgnMaxSniperCount: ["gmgn", "maxSniperCount"],
-      gmgnMaxSniperHoldRate: ["gmgn", "maxSniperHoldRate"],
-      gmgnPreferredKolNames: ["gmgn", "preferredKolNames"],
-      gmgnPreferredKolMinHoldPct: ["gmgn", "preferredKolMinHoldPct"],
-      gmgnDumpKolNames: ["gmgn", "dumpKolNames"],
-      gmgnDumpKolMinHoldPct: ["gmgn", "dumpKolMinHoldPct"],
-      gmgnRequireKol: ["gmgn", "requireKol"],
-      gmgnMinKolCount: ["gmgn", "minKolCount"],
-      gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount"],
-      gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
-      gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
-      gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
-      gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
-      gmgnRejectAtBottom: ["gmgn", "indicatorRules", "rejectAlreadyAtBottom"],
-      gmgnRequireAboveSt: ["gmgn", "indicatorRules", "requireAboveSupertrend"],
-      gmgnMinRsi: ["gmgn", "indicatorRules", "minRsi"],
-      gmgnMaxRsi: ["gmgn", "indicatorRules", "maxRsi"],
-      gmgnRequireBbPosition: ["gmgn", "indicatorRules", "requireBbPosition"],
+      pnlSource: ["pnl", "source", ["pnlSource"]],
+      pnlRpcUrl: ["pnl", "rpcUrl", ["pnlRpcUrl"]],
+      pnlPollIntervalSec: ["pnl", "pollIntervalSec", ["pnlPollIntervalSec"]],
+      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec", ["pnlDepositCacheTtlSec"]],
+      // gmgn fee source
+      gmgnFeeSource: ["gmgn", "feeSource", ["gmgnFeeSource"]],
+      gmgnApiKey: ["gmgn", "apiKey", ["gmgnApiKey"]],
       // chart indicators
       chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
       indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
@@ -479,9 +443,6 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
-      // timing entry
-      timingEntryEnabled: ["timingEntry", "enabled"],
-      minDumpPct: ["timingEntry", "minDumpPct"],
     };
 
     const applied = {};
@@ -491,21 +452,30 @@ const toolMap = {
     const CONFIG_MAP_LOWER = Object.fromEntries(
       Object.entries(CONFIG_MAP).map(([k, v]) => [k.toLowerCase(), [k, v]])
     );
-    const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
 
+    if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
+      return { success: false, error: "changes must be an object", reason };
+    }
+
+    const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
       if (!match) { unknown.push(key); continue; }
-      let normalizedVal = val;
-      if (STRATEGY_BIN_KEYS.has(match[0])) {
-        const numericVal = Number(val);
-        if (!Number.isFinite(numericVal)) {
-          unknown.push(key);
-          continue;
+      try {
+        let normalizedVal = val;
+        if (STRATEGY_BIN_KEYS.has(match[0])) {
+          const numericVal = Number(val);
+          if (!Number.isFinite(numericVal)) {
+            throw new Error(`${match[0]} must be a finite number`);
+          }
+          normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+        } else {
+          normalizedVal = normalizeConfigValue(match[0], val);
         }
-        normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+        applied[match[0]] = normalizedVal;
+      } catch (error) {
+        return { success: false, error: error.message, key: match[0], reason };
       }
-      applied[match[0]] = normalizedVal;
     }
 
     if (Object.keys(applied).length === 0) {
@@ -523,8 +493,6 @@ const toolMap = {
     }
 
     // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
-    // DISABLED: breaks user-config.json overrides. Use manual scaling instead.
-    /*
     if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
       const tf = normalizeTimeframe(applied.timeframe);
       applied.timeframe = tf;
@@ -534,23 +502,14 @@ const toolMap = {
       applied._timeframeScaled = true;
       log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
     }
-    */
 
-    // Apply to live config immediately
+    // Apply to live config immediately after the persisted config is known-good.
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
-      const [section, field, third] = CONFIG_MAP[key];
-      const isNestedField = typeof third === "string";
-      if (isNestedField) {
-        if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
-        const before = config[section][field][third];
-        config[section][field][third] = val;
-        log("config", `update_config: config.${section}.${field}.${third} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)}`);
-      } else {
-        const before = config[section][field];
-        config[section][field] = val;
-        log("config", `update_config: config.${section}.${field} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)} (verify: ${redactConfigValue(key, config[section][field])})`);
-      }
+      const [section, field] = CONFIG_MAP[key];
+      const before = config[section][field];
+      config[section][field] = val;
+      log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
     }
     if (
       applied.binsBelow != null ||
@@ -569,28 +528,9 @@ const toolMap = {
       );
     }
 
-    // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
-    let gmgnConfig = {};
-    if (fs.existsSync(GMGN_CONFIG_PATH)) {
-      try { gmgnConfig = JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8")); } catch { /**/ }
-    }
-    let wroteUserConfig = false;
-    let wroteGmgnConfig = false;
     for (const [key, val] of Object.entries(applied)) {
       if (key.startsWith("_")) continue;
-      const [section, field, third] = CONFIG_MAP[key] || [];
-      const persistPath = Array.isArray(third) ? third : null;
-      const nestedField = typeof third === "string" ? third : null;
-      if (section === "gmgn") {
-        if (nestedField) {
-          if (!gmgnConfig[field] || typeof gmgnConfig[field] !== "object") gmgnConfig[field] = {};
-          gmgnConfig[field][nestedField] = val;
-        } else {
-          gmgnConfig[field] = val;
-        }
-        wroteGmgnConfig = true;
-        continue;
-      }
+      const persistPath = CONFIG_MAP[key]?.[2];
       if (Array.isArray(persistPath) && persistPath.length > 0) {
         let target = userConfig;
         for (const part of persistPath.slice(0, -1)) {
@@ -603,38 +543,28 @@ const toolMap = {
       } else {
         userConfig[key] = val;
       }
-      wroteUserConfig = true;
     }
-    const tunedAt = new Date().toISOString();
-    if (wroteUserConfig) {
-      userConfig._lastAgentTune = tunedAt;
-      fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
-    }
-    if (wroteGmgnConfig) {
-      gmgnConfig._lastAgentTune = tunedAt;
-      fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnConfig, null, 2));
-    }
+    userConfig._lastAgentTune = new Date().toISOString();
+    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
     // Restart cron jobs if intervals changed
     const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
+      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.pnl.pollIntervalSec}s`);
     }
 
-    // Save as a lesson — but skip ephemeral per-deploy interval changes
-    // (managementIntervalMin / screeningIntervalMin change every deploy based on volatility;
-    //  the rule is already in the system prompt, storing it 75+ times is pure noise)
+    // Skip repeated volatility-driven interval changes; they are operational tuning, not reusable lessons.
     const lessonsKeys = Object.keys(applied).filter(
       k => !k.startsWith("_") && k !== "managementIntervalMin" && k !== "screeningIntervalMin"
     );
     if (lessonsKeys.length > 0) {
-      const summary = lessonsKeys.map(k => `${k}=${redactConfigValue(k, applied[k])}`).join(", ");
+      const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");
       addLesson(`[SELF-TUNED] Changed ${summary} — ${reason}`, ["self_tune", "config_change"]);
     }
 
-    log("config", `Agent self-tuned: ${JSON.stringify(redactAppliedConfig(applied))} — ${reason}`);
-    return { success: true, applied: redactAppliedConfig(applied), unknown, reason };
+    log("config", `Agent self-tuned: ${JSON.stringify(applied)} — ${reason}`);
+    return { success: true, applied, unknown, reason };
   },
 };
 
@@ -698,24 +628,6 @@ export async function executeTool(name, args) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
-        if (result.success && result.position && result.pool) {
-          (async () => {
-            try {
-              await new Promise(r => setTimeout(r, 30000));
-              const pnl = await getPositionPnl({ pool_address: result.pool, position_address: result.position });
-              const pnlPct = Number(pnl?.pnl_pct ?? 0);
-              const currentValue = Number(pnl?.current_value_usd ?? 0);
-              if (pnlPct < -5 && pnlPct > -99) {
-                log("deploy", `Post-deploy validation: PnL ${pnlPct}% < -5% — bad position state, auto-closing`);
-                await closePosition({ position_address: result.position, reason: "post_deploy_failed" });
-              } else if (pnlPct <= -99) {
-                log("deploy", `Post-deploy PnL ${pnlPct}% — position not yet indexed by API, skipping auto-close`);
-              }
-            } catch (e) {
-              log("deploy", `Post-deploy PnL check failed: ${e.message}`);
-            }
-          })();
-        }
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
@@ -724,60 +636,16 @@ export async function executeTool(name, args) {
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
         // Auto-swap base token back to SOL unless user said to hold
-        const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
-        if (!args.skip_swap && result.base_mint && result.base_mint !== WRAPPED_SOL_MINT) {
+        if (!args.skip_swap && result.base_mint) {
           try {
-            let tokenBalance = null;
-            // Try Helius first (fast path), retry with delay for indexing lag
-            for (let attempt = 0; attempt < 3; attempt++) {
-              const balances = await getWalletBalances({});
-              if (balances.error) {
-                if (attempt < 2) { await new Promise(r => setTimeout(r, 2000)); continue; }
-                break;
-              }
-              const t = balances.tokens?.find(t => t.mint === result.base_mint);
-              if (t && t.balance > 0) { tokenBalance = t.balance; break; }
-              if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
-            }
-            // Fallback: direct RPC token account balance if Helius failed
-            if (tokenBalance === null) {
-              const walletAddress = getWallet().publicKey.toString();
-              const rpcUrl = process.env.RPC_URL || config.rpcUrl;
-              const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
-              for (const progId of TOKEN_PROGRAMS) {
-                for (let attempt = 0; attempt < 3; attempt++) {
-                  try {
-                    const res = await fetch(rpcUrl, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        jsonrpc: "2.0", id: 1,
-                        method: "getTokenAccountsByOwner",
-                        params: [walletAddress, { mint: result.base_mint, programId: progId }, { encoding: "jsonParsed" }]
-                      })
-                    });
-                    const data = await res.json();
-                    const accounts = data?.result?.value || [];
-                    if (accounts.length > 0) {
-                      const parsed = accounts[0].account?.data?.parsed?.info?.tokenAmount;
-                      if (parsed && parseFloat(parsed.uiAmount) > 0) {
-                        tokenBalance = parseFloat(parsed.uiAmount);
-                        break;
-                      }
-                    }
-                  } catch (rpcErr) {
-                    log("executor_warn", `Auto-swap RPC fallback attempt ${attempt + 1}/3: ${rpcErr.message}`);
-                  }
-                  if (tokenBalance === null && attempt < 2) await new Promise(r => setTimeout(r, 2000));
-                }
-                if (tokenBalance !== null) break;
-              }
-            }
-            if (tokenBalance !== null && tokenBalance > 0) {
-              log("executor", `Auto-swapping ${result.base_mint.slice(0, 8)} (${tokenBalance}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: tokenBalance });
+            const balances = await getWalletBalances({});
+            const token = balances.tokens?.find(t => t.mint === result.base_mint);
+            if (token && token.usd >= 0.10) {
+              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
+              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+              // Tell the model the swap already happened so it doesn't call swap_token again
               result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL. Do NOT call swap_token again.`;
+              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
             }
           } catch (e) {
@@ -786,43 +654,11 @@ export async function executeTool(name, args) {
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
-          let tokenBalance = null;
-          for (let attempt = 0; attempt < 2; attempt++) {
-            const balances = await getWalletBalances({});
-            if (balances.error) {
-              if (attempt === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
-              break;
-            }
-            const t = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (t && t.balance > 0) { tokenBalance = t.balance; break; }
-            break;
-          }
-          if (tokenBalance === null) {
-            try {
-              const { PublicKey } = await import("@solana/web3.js");
-              const conn = getConnection();
-              const wallet = getWallet();
-              const mintPubkey = new PublicKey(result.base_mint);
-              const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
-              for (const progId of TOKEN_PROGRAMS) {
-                try {
-                  const accounts = await conn.getTokenAccountsByOwner(wallet.publicKey, { mint: mintPubkey, programId: new PublicKey(progId) });
-                  if (accounts.value.length > 0) {
-                    const parsed = accounts.value[0].account.data?.parsed?.info?.tokenAmount;
-                    if (parsed && parseFloat(parsed.uiAmount) > 0) {
-                      tokenBalance = parseFloat(parsed.uiAmount);
-                      break;
-                    }
-                  }
-                } catch (_) {}
-              }
-            } catch (rpcErr) {
-              log("executor_warn", `Auto-swap RPC fallback after claim failed: ${rpcErr.message}`);
-            }
-          }
-          if (tokenBalance !== null && tokenBalance > 0) {
-            log("executor", `Auto-swapping claimed ${result.base_mint.slice(0, 8)} (${tokenBalance}) back to SOL`);
-            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: tokenBalance });
+          const balances = await getWalletBalances({});
+          const token = balances.tokens?.find(t => t.mint === result.base_mint);
+          if (token && token.usd >= 0.10) {
+            log("executor", `Auto-swapping claimed ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
+            await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
           }
         } catch (e) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
@@ -918,6 +754,17 @@ async function runSafetyChecks(name, args) {
           reason: `bins_below ${args.bins_below ?? "missing"} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
         };
       }
+      if (
+        isSingleSidedSol &&
+        args.upside_pct == null &&
+        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove !== 0)
+      ) {
+        return {
+          pass: false,
+          reason: "Single-side SOL deploy must use bins_above=0.",
+        };
+      }
+
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
       if (positions.total_positions >= config.risk.maxPositions) {
@@ -950,8 +797,8 @@ async function runSafetyChecks(name, args) {
       }
 
       // Check amount limits
-      const amountY = args.amount_y ?? args.amount_sol ?? 0;
-      if (amountY <= 0) {
+      const amountY = deployAmountY;
+      if (!Number.isFinite(amountY) || amountY <= 0) {
         return {
           pass: false,
           reason: `Must provide a positive SOL amount (amount_y).`,
@@ -969,14 +816,6 @@ async function runSafetyChecks(name, args) {
         return {
           pass: false,
           reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
-        };
-      }
-      // Hard cap: enforce deployAmountSol as absolute ceiling (prevent LLM override)
-      const maxAllowed = config.management.deployAmountSol;
-      if (amountY > maxAllowed) {
-        return {
-          pass: false,
-          reason: `Amount ${amountY} SOL exceeds configured deployAmountSol (${maxAllowed} SOL). LLM cannot override.`,
         };
       }
 

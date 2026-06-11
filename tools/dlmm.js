@@ -8,7 +8,6 @@ import {
   TransactionInstruction,
   VersionedTransaction,
   sendAndConfirmTransaction,
-  LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
@@ -525,7 +524,6 @@ export async function deployPosition({
     spot: StrategyType.Spot,
     curve: StrategyType.Curve,
     bid_ask: StrategyType.BidAsk,
-    mixed: StrategyType.BidAsk,
   };
 
   const strategyType = strategyMap[activeStrategy];
@@ -773,9 +771,7 @@ export async function deployPosition({
   const newPosition = Keypair.generate();
 
   log("deploy", `Pool: ${pool_address}`);
-  // Normalize display: mixed → hybrid
-  const displayStrategy = activeStrategy === "mixed" ? "hybrid" : activeStrategy;
-  log("deploy", `Strategy: ${displayStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
   log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
@@ -987,20 +983,13 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const currentValue = solMode
       ? safeNum(p.unrealizedPnl?.balancesSol)
       : safeNum(p.unrealizedPnl?.balances);
-    // Cross-check our explicit PnL formula vs Meteora's pre-computed.
-    // Logs a warning if delta exceeds the configured threshold.
-    validateOpenPnlValue(p, solMode);
-    // Use the explicit formula as the primary PnL source; fall back to Meteora's
-    // pre-computed value if the formula can't derive (e.g. missing deposits).
-    const explicitPnl = deriveOpenPnlValue(p, solMode);
-    const fallbackPnl = solMode ? safeNum(p.pnlSol) : safeNum(p.pnlUsd);
-    const derivedPnlPct = deriveOpenPnlPct(p, solMode);
     const reportedPnlPct = solMode
       ? maybeNum(p.pnlSolPctChange)
       : maybeNum(p.pnlPctChange);
+    const derivedPnlPct = deriveOpenPnlPct(p, solMode);
     return {
-      pnl_usd:           roundNum(explicitPnl || fallbackPnl, 4),
-      pnl_pct:           roundNum(derivedPnlPct ?? reportedPnlPct ?? 0, 2),
+      pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
+      pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
       all_time_fees_usd: roundNum(solMode ? p.allTimeFees?.total?.sol : p.allTimeFees?.total?.usd, 4),
@@ -1067,13 +1056,13 @@ function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
-export function getClosedPnlValue(posEntry, solMode = false) {
+function getClosedPnlValue(posEntry, solMode = false) {
   return solMode
     ? maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative) ?? 0
     : maybeNum(posEntry?.pnlUsd) ?? maybeNum(posEntry?.pnl?.value) ?? 0;
 }
 
-export function getClosedPnlPct(posEntry, solMode = false) {
+function getClosedPnlPct(posEntry, solMode = false) {
   const reported = solMode
     ? maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative)
     : maybeNum(posEntry?.pnlPctChange) ?? maybeNum(posEntry?.pnl?.percent);
@@ -1086,7 +1075,7 @@ export function getClosedPnlPct(posEntry, solMode = false) {
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
 }
 
-export function deriveOpenPnlPct(binData, solMode = false) {
+function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
   const deposit = solMode
@@ -1094,54 +1083,21 @@ export function deriveOpenPnlPct(binData, solMode = false) {
     : safeNum(binData.allTimeDeposits?.total?.usd);
   if (deposit <= 0) return null;
 
-  const pnl = deriveOpenPnlValue(binData, solMode);
-  return (pnl / deposit) * 100;
-}
-
-// Absolute PnL value via the explicit formula. Mirrors /home/ubuntu/meridian/scripts/lib/pnl.cjs.
-//   PnL = (balances + withdrawals + claimable + claimed) - deposits
-// USD: exact match vs Meteora per-position pnlUsd. SOL: small drift expected.
-export function deriveOpenPnlValue(binData, solMode = false) {
-  if (!binData) return 0;
   const balances = solMode
     ? safeNum(binData.unrealizedPnl?.balancesSol)
     : safeNum(binData.unrealizedPnl?.balances);
   const unclaimedFees = solMode
     ? safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol)
     : safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd);
-  const unclaimedRewards = solMode
-    ? safeNum(binData.unrealizedPnl?.unclaimedRewardTokenX?.amountSol) + safeNum(binData.unrealizedPnl?.unclaimedRewardTokenY?.amountSol)
-    : safeNum(binData.unrealizedPnl?.unclaimedRewardTokenX?.usd) + safeNum(binData.unrealizedPnl?.unclaimedRewardTokenY?.usd);
   const withdrawals = solMode
     ? safeNum(binData.allTimeWithdrawals?.total?.sol)
     : safeNum(binData.allTimeWithdrawals?.total?.usd);
   const fees = solMode
     ? safeNum(binData.allTimeFees?.total?.sol)
     : safeNum(binData.allTimeFees?.total?.usd);
-  const deposit = solMode
-    ? safeNum(binData.allTimeDeposits?.total?.sol)
-    : safeNum(binData.allTimeDeposits?.total?.usd);
-  return balances + unclaimedFees + unclaimedRewards + withdrawals + fees - deposit;
-}
 
-// Cross-check our explicit PnL vs Meteora's pre-computed value.
-// Logs a warning if the absolute delta exceeds `usdThreshold` (USD) or
-// `solThreshold` (SOL). Returns the delta for callers that want to act on it.
-function validateOpenPnlValue(binData, solMode = false, { usdThreshold = 0.5, solThreshold = 0.005 } = {}) {
-  if (!binData) return null;
-  const ours = deriveOpenPnlValue(binData, solMode);
-  const reported = solMode
-    ? safeNum(binData.pnlSol)
-    : safeNum(binData.pnlUsd);
-  const delta = ours - reported;
-  const threshold = solMode ? solThreshold : usdThreshold;
-  if (Math.abs(delta) > threshold) {
-    log(
-      "pnl_warn",
-      `${solMode ? "SOL" : "USD"} PnL delta ${delta.toFixed(solMode ? 6 : 2)} exceeds threshold (ours=${ours.toFixed(solMode ? 6 : 2)}, meteora=${reported.toFixed(solMode ? 6 : 2)})`,
-    );
-  }
-  return delta;
+  const pnl = balances + unclaimedFees + withdrawals + fees - deposit;
+  return (pnl / deposit) * 100;
 }
 
 function deriveLpAgentPnlPct(lpData, solMode = false) {
@@ -1300,15 +1256,6 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
-          // Always-USD unclaimed fees (parallel to total_value_true_usd).
-          unclaimed_fees_true_usd: lpData
-            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
-            : binData
-            ? Math.round((
-                parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0)
-                + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
-              ) * 10000) / 10000
-            : null,
           total_value_usd:    lpData
             ? Math.round((
                 config.management.solMode
@@ -1343,15 +1290,6 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
             : null,
           pnl_usd:            lpData
-            ? Math.round((
-                config.management.solMode
-                  ? safeNum(lpData.pnl?.valueNative)
-                  : safeNum(lpData.pnl?.value)
-              ) * 10000) / 10000
-            : binData
-            ? Math.round(deriveOpenPnlValue(binData, config.management.solMode) * 10000) / 10000
-            : null,
-          pnl_usd_meteora:    lpData
             ? Math.round((
                 config.management.solMode
                   ? safeNum(lpData.pnl?.valueNative)
@@ -2139,91 +2077,4 @@ async function lookupPoolForPosition(position_address, walletAddress) {
   }
 
   throw new Error(`Position ${position_address} not found in open positions`);
-}
-
-// ─── Add Liquidity to Existing Position (for multi-layer/hybrid) ──────────────────────
-export async function addLiquidityToPosition({
-  position_address,
-  amount_sol,
-  strategy = "spot",
-}) {
-  if (process.env.DRY_RUN === "true") {
-    return { dry_run: true, would_add_to: position_address, message: "DRY RUN — no transaction sent" };
-  }
-
-  const wallet = getWallet();
-  const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
-  const pool = await getPool(poolAddress);
-  const positionPubKey = new PublicKey(position_address);
-
-  // Get position data to find current bin range
-  const positionData = await pool.getPosition(positionPubKey);
-  const positionBinData = positionData?.positionData;
-  if (!positionBinData) {
-    throw new Error(`Position ${position_address} not found or empty`);
-  }
-
-  const minBinId = positionBinData.lowerBinId;
-  const maxBinId = positionBinData.upperBinId;
-
-  // Map strategy name to SDK strategy type
-  const { StrategyType } = await import("@meteora-ag/dlmm");
-  const strategyMap = {
-    spot: StrategyType.Spot,
-    curve: StrategyType.Curve,
-    bid_ask: StrategyType.BidAsk,
-  };
-  const strategyType = strategyMap[strategy];
-  if (strategyType === undefined) {
-    throw new Error(`Invalid strategy: ${strategy}. Use spot, curve, or bid_ask.`);
-  }
-
-  // Convert SOL amount to lamports
-  const amountYLamports = new BN(Math.round(amount_sol * 1_000_000_000));
-
-  log("deploy", `Adding ${amount_sol} SOL liquidity to ${position_address} with strategy ${strategy}`);
-
-  // Wide-range positions (>69 bins) were created via createExtendedEmptyPosition +
-  // addLiquidityByStrategyChunkable, so they must use addLiquidityByStrategyChunkable for subsequent adds.
-  const binRange = maxBinId - minBinId;
-  let txHashes;
-
-  if (binRange > 69) {
-    log("deploy", `Wide-range position detected (${binRange} bins) — using addLiquidityByStrategyChunkable`);
-    const addTxs = await pool.addLiquidityByStrategyChunkable({
-      positionPubKey,
-      user: wallet.publicKey,
-      totalXAmount: new BN(0),
-      totalYAmount: amountYLamports,
-      strategy: { minBinId, maxBinId, strategyType },
-      slippage: 1000,
-    });
-    const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-    txHashes = [];
-    for (const addTx of addTxArray) {
-      const h = await sendAndConfirmTransaction(getConnection(), addTx, [wallet]);
-      txHashes.push(h);
-    }
-  } else {
-    const tx = await pool.addLiquidityByStrategy({
-      positionPubKey,
-      totalXAmount: new BN(0),
-      totalYAmount: amountYLamports,
-      strategy: { minBinId, maxBinId, strategyType },
-      user: wallet.publicKey,
-      slippage: 1000,
-    });
-    const h = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-    txHashes = [h];
-  }
-
-  log("deploy", `Added liquidity tx(s): ${txHashes.join(", ")}`);
-
-  return {
-    success: true,
-    position: position_address,
-    amount_sol,
-    strategy,
-    tx: txHashes[0],
-  };
 }

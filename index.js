@@ -214,7 +214,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🟢 management cycle", "evaluating positions...");
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -285,102 +285,30 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
-    // Total unclaimed in USD (always, independent of solMode).
-    const totalUnclaimedUsd = positionData.reduce((s, p) => s + (
-      p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : (p.unclaimed_fees_usd ?? 0)
-    ), 0);
-    const cur = config.management.solMode ? "◎" : "$";
+    const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
-    const blocks = positionData.map((p, i) => {
-      const num = `${i + 1}.`;
+    const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
-      const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
-      // 'uang' = always USD (independent of solMode). Fall back to unclaimed_fees_usd if true_usd missing.
-      const feesUsd = p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : p.unclaimed_fees_usd;
-      const fees    = `$${(feesUsd ?? 0).toFixed(2)}`;
-      const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
-
-      // Status emoji per position (clock-themed, no cats)
-      let status;
-      if (act.action === "CLOSE" && act.rule === "exit") {
-        status = "🎯 TP";
-      } else if (act.action === "CLOSE") {
-        status = "👋 close";
-      } else if (act.action === "CLAIM") {
-        status = "💸 claim";
-      } else if (act.action === "INSTRUCTION") {
-        status = "🤔 eval";
-      } else if (!p.in_range) {
-        const oorM = p.minutes_out_of_range != null ? p.minutes_out_of_range : 0;
-        status = `⏰ OOR ${oorM}m`;
-      } else {
-        // In range (pnl + / - / 0 all collapse to one indicator)
-        status = "✅ hold";
-      }
-
-      // Trim very long pair names
-      const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
-      // Number column pads to 2 chars so 1-9 align and 10+ still readable (rare)
-      const numCol = num.padStart(3);
-      let b = `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  🏦 ${val.padStart(7)}  💰 ${fees.padStart(5)}  ${age.padStart(4)}  ${status}`;
-      if (p.instruction) b += `\n      📝 "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.reason && act.rule !== "exit") b += `\n      reason: ${act.reason}`;
-      return b;
+      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
+      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      if (p.instruction) line += `\nNote: "${p.instruction}"`;
+      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      return line;
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
-    const hasOor = positionData.some(p => !p.in_range && actionMap.get(p.position)?.action === "STAY");
-    const totalPnl = positionData.reduce((s, p) => s + (p.pnl_pct ?? 0), 0);
     const actionSummary = needsAction.length > 0
-      ? needsAction.map(a => {
-          if (a.action === "CLOSE" && a.rule === "exit") return "🎯 TP";
-          if (a.action === "CLOSE") return `👋 ${a.reason || "close"}`;
-          if (a.action === "CLAIM") return "💸 claim";
-          if (a.action === "INSTRUCTION") return "🤔 eval";
-          return a.action;
-        }).join(" · ")
-      : hasOor
-        ? "😵 wobbly"
-        : totalPnl > 0
-          ? "😺 all good"
-          : totalPnl < 0
-            ? "🫠 in the red"
-            : "🌙 flat";
+      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
+      : "no action";
 
-    // Header mood emoji + tagline based on portfolio state
-    let headerEmoji, headerTag;
-    if (needsAction.length > 0) {
-      headerEmoji = "🛎️";
-      headerTag = "action time";
-    } else if (hasOor) {
-      headerEmoji = "😵";
-      headerTag = "wobbly";
-    } else if (totalPnl > 0) {
-      headerEmoji = "🟢";
-      headerTag = "looking good";
-    } else if (totalPnl < 0) {
-      headerEmoji = "🫠";
-      headerTag = "in the red";
-    } else {
-      headerEmoji = "🌙";
-      headerTag = "flat";
-    }
-
-    // WIB = Asia/Jakarta (UTC+7). Format HH:MM.
-    const wibTime = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Jakarta",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(new Date());
-    mgmtReport = [
-      `${headerEmoji} ${headerTag}  ·  ${wibTime} WIB  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
-      "",
-      ...blocks,
-      "",
-      `  🏦  ${cur}${totalValue.toFixed(2)}  ·  💰  $${totalUnclaimedUsd.toFixed(2)}  ·  ${actionSummary}`,
-    ].join("\n");
+    const cur = config.management.solMode ? "◎" : "$";
+    mgmtReport = reportLines.join("\n\n") +
+      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -424,20 +352,6 @@ After executing, write a brief one-line result per position.
       mgmtReport += `\n\n${content}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
-      // Per-position PnL snapshot for cross-check vs pnl_warn (formula vs Meteora).
-      for (const p of positionData) {
-        const cur = config.management.solMode ? "◎" : "$";
-        const ours = p.pnl_usd != null ? p.pnl_usd : 0;
-        const meteora = p.pnl_usd_meteora != null ? p.pnl_usd_meteora : 0;
-        const delta = ours - meteora;
-        const flag = config.management.solMode
-          ? (Math.abs(delta) > 0.005 ? " ⚠️" : " ✓")
-          : (Math.abs(delta) > 0.5 ? " ⚠️" : " ✓");
-        log(
-          "pnl_snapshot",
-          `${p.pair} (${p.position?.slice(0, 8)}) | PnL ${cur}${ours.toFixed(4)} (${p.pnl_pct ?? "?"}%, derived ${p.pnl_pct_derived ?? "?"}%) | Meteora ${cur}${meteora.toFixed(4)} | delta ${delta.toFixed(4)}${flag}`,
-        );
-      }
       await liveMessage?.note("No tool actions needed.");
     }
 
@@ -528,29 +442,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const deployStrategy = config.strategy.strategy;
-    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (single-side SOL) | deposit: SOL only (amount_y, amount_x=0)`
+    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    let topCandidates;
-    if (config.screening.useGmgnSource) {
-      const { getGmgnCandidates } = await import("./tools/gmgn-screening.js");
-      topCandidates = await getGmgnCandidates({ limit: 10 }).catch(() => null);
-      log("cron", `GMGN screening: ${topCandidates?.candidates?.length || 0} candidates`);
-    } else {
-      log("cron", "Fetching top candidates via Meteora pool discovery...");
-      const timeoutPromise = new Promise(r => setTimeout(() => r({ _timeout: true }), 60000));
-      topCandidates = await Promise.race([
-        getTopCandidates({ limit: 10 }).catch(err => {
-          log("cron", `getTopCandidates error: ${err?.message || err}`);
-          return null;
-        }),
-        timeoutPromise,
-      ]);
-      if (topCandidates?._timeout) log("cron", "getTopCandidates: timed out after 60s");
-      else if (topCandidates === null) log("cron", "getTopCandidates: returned null (no candidates)");
-      else log("cron", `getTopCandidates: ${topCandidates?.candidates?.length || topCandidates?.pools?.length || 0} candidates`);
-    }
+    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
 
@@ -592,14 +488,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
-      }
-      // Timing entry: bonus score for dumping candidates
-      if (config.timingEntry?.enabled) {
-        const priceChange = pool.stats_1h?.price_change ?? ti?.stats_1h?.price_change;
-        if (priceChange != null && priceChange <= config.timingEntry.minDumpPct) {
-          pool.dump_bonus = 5;
-          log("screening", `Timing bonus: ${pool.name} dumping ${priceChange}%, +5 score`);
-        }
       }
       return true;
     });
@@ -661,7 +549,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
-      const feesSol = pool.gmgn_total_fee_sol ?? ti?.global_fees_sol ?? "?";
+      const feesSol = ti?.global_fees_sol ?? "?";
       const launchpad = ti?.launchpad ?? null;
       const priceChange = ti?.stats_1h?.price_change;
       const netBuyers = ti?.stats_1h?.net_buyers;
@@ -720,7 +608,8 @@ STEPS:
 3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
-    For single-side SOL deploys, keep bins_above = 0 — the upper bin pins to the active bin. Do NOT request upside exposure.
+   For single-side SOL deploys, do not invent upside:
+   set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
 4. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
@@ -997,7 +886,7 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && managementConfig.stopLossPct != null && position.pnl_pct != null && (position.age_minutes ?? 0) >= 5 && position.pnl_pct <= managementConfig.stopLossPct) {
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
@@ -1006,31 +895,23 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.active_bin != null &&
     position.upper_bin != null &&
-    position.active_bin > position.upper_bin
+    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    const oorMinutes = position.minutes_out_of_range ?? 0;
-    const rightWaitCfg = managementConfig.outOfRangeRightWaitMinutes ?? 30;
-    const rightWait = (rightWaitCfg === "auto" || rightWaitCfg === null)
-      ? Math.max(30, Math.min(360, Math.round(360 - (position.volatility ?? 5) * 30)))
-      : Math.max(0, Math.round(rightWaitCfg));
-    if (oorMinutes < rightWait) {
-      log("cron", `Rule 3 deferred: ${position.pair} OOR_right only ${oorMinutes}m — waiting ${rightWait}m before close`);
-      return null;
-    }
-    if (position.pnl_pct != null && position.pnl_pct < 0) {
-      log("cron", `Rule 3 deferred: ${position.pair} OOR_right ${oorMinutes}m but pnl ${position.pnl_pct}% < 0 — holding until breakeven`);
-      return null;
-    }
-    return { action: "CLOSE", rule: 3, reason: `OOR_right ${oorMinutes}m` };
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
   }
-  // Rule 7 (left-OOR): price below range — wait for profit, no forced close
-  // Just hold and monitor; close only when price returns to range AND profit
+  if (
+    position.active_bin != null &&
+    position.upper_bin != null &&
+    position.active_bin > position.upper_bin &&
+    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+  ) {
+    return { action: "CLOSE", rule: 4, reason: "OOR" };
+  }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= 60
   ) {
-    if (position.pnl_pct != null && position.pnl_pct < 0) return null;
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
   return null;
@@ -1257,7 +1138,6 @@ function renderSettingsMenu(page = "main") {
     rows = [
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
-      [toggleButton("timingEntryEnabled", "Dump timing"), toggleButton("useDiscordSignals", "Discord")],
       [
         settingButton("Risk / deploy", "cfg:page:risk"),
         settingButton("Screening", "cfg:page:screen"),
@@ -1439,25 +1319,12 @@ async function deployLatestCandidate(index) {
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const binsBelow = computeBinsBelow(candidate.volatility);
-  const strategy = config.strategy.strategy;
-
-  // binsAbove: single-side SOL deploys must use 0
-  const binsAbove = 0;
-
-  // HYBRID STRATEGY: 70% bid_ask + 30% spot
-  const isHybrid = strategy === "hybrid";
-  const bidAskAmount = isHybrid ? Math.round(deployAmount * 0.7 * 10000) / 10000 : deployAmount;
-  const spotAmount = isHybrid ? Math.round(deployAmount * 0.3 * 10000) / 10000 : 0;
-
-  log("deploy", `HYBRID: ${isHybrid} | strategy: ${strategy} | total: ${deployAmount} | bid_ask: ${bidAskAmount} | spot: ${spotAmount}`);
-
-  // Step 1: Deploy bid_ask (or full amount if not hybrid)
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
-    amount_y: bidAskAmount,
-    strategy: isHybrid ? "bid_ask" : strategy,
+    amount_y: deployAmount,
+    strategy: config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: binsAbove,
+    bins_above: 0,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,
@@ -1470,22 +1337,6 @@ async function deployLatestCandidate(index) {
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
-
-  // Step 2: Add spot liquidity for hybrid
-  if (isHybrid && spotAmount > 0.01 && result?.position) {
-    log("deploy", `Adding ${spotAmount} SOL spot liquidity to position ${result.position}`);
-    const addResult = await executeTool("add_liquidity_to_position", {
-      position_address: result.position,
-      amount_sol: spotAmount,
-      strategy: "spot",
-    });
-    if (addResult?.success === false || addResult?.error) {
-      log("deploy", `Warning: add_liquidity_to_position failed: ${addResult?.error}, continuing with bid_ask only`);
-    } else {
-      log("deploy", "Spot liquidity added successfully");
-    }
-  }
-
   return { result, candidate, deployAmount, binsBelow };
 }
 
@@ -1529,6 +1380,9 @@ async function telegramHandler(msg) {
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
+      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+    } else {
+      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
     }
     return;
   }
@@ -1571,39 +1425,13 @@ async function telegramHandler(msg) {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
-      const wib = new Intl.DateTimeFormat("en-GB", {
-        timeZone: "Asia/Jakarta", hour: "2-digit", minute: "2-digit", hour12: false,
-      }).format(new Date());
-
-      const blocks = positions.map((p, i) => {
-        const num = `${i + 1}.`;
-        const val  = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
-        const pnl  = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
-        const feesUsd = p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : p.unclaimed_fees_usd;
-        const fees = `$${(feesUsd ?? 0).toFixed(2)}`;
-        const age  = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
-        const status = p.in_range
-          ? "✅ hold"
-          : `⏰ OOR ${p.minutes_out_of_range ?? 0}m`;
-        const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
-        const numCol = num.padStart(3);
-        return `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  🏦 ${val.padStart(7)}  💰 ${fees.padStart(5)}  ${age.padStart(4)}  ${status}`;
+      const lines = positions.map((p, i) => {
+        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+        const oor = !p.in_range ? " ⚠️OOR" : "";
+        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
       });
-
-      const totalValue = positions.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
-      const totalFeesUsd = positions.reduce((s, p) => s + (
-        p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : (p.unclaimed_fees_usd ?? 0)
-      ), 0);
-
-      await sendMessage([
-        `📊 positions  ·  ${wib} WIB  ·  ${total_positions} open`,
-        "",
-        ...blocks,
-        "",
-        `  🏦  ${cur}${totalValue.toFixed(2)}  ·  💰  $${totalFeesUsd.toFixed(2)}`,
-        "",
-        "/close <n> · /set <n> <note>",
-      ].join("\n"));
+      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -1825,29 +1653,20 @@ function fmtPct(value) {
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
 
-const TOP10_WHITELIST = new Set([
-  "zinc155BS4mSPk8GXQj4R5hkVDQXcW253pTYq5SGyfi",
-]);
-
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   if (!pool) return "missing candidate data";
   const smartWalletCount = Math.max(sw?.in_pool?.length ?? 0, Number(pool.gmgn_smart_wallets ?? 0) || 0);
   const tokenInfo = ti || {};
   const hasNarrative = !!n?.narrative;
-  const globalFeesSol = Number(pool.gmgn_total_fee_sol ?? tokenInfo.global_fees_sol);
+  const globalFeesSol = Number(tokenInfo.global_fees_sol ?? pool.gmgn_total_fee_sol);
   const top10Pct = Number(tokenInfo.audit?.top_holders_pct ?? pool.gmgn_token_info_top10_pct ?? pool.gmgn_top10_holder_pct);
   const botPct = Number(tokenInfo.audit?.bot_holders_pct ?? pool.gmgn_bot_degen_pct);
-  const mint = pool.base?.mint;
   if (pool.is_pvp && smartWalletCount === 0) return "PVP symbol conflict and no smart-wallet confirmation";
   if (Number.isFinite(globalFeesSol) && globalFeesSol < config.screening.minTokenFeesSol) {
     return `token fees ${globalFeesSol} SOL below minimum ${config.screening.minTokenFeesSol} SOL`;
   }
   if (Number.isFinite(top10Pct) && top10Pct > config.screening.maxTop10Pct) {
-    if (mint && TOP10_WHITELIST.has(mint)) {
-      log("screening", `Top 10 exemption for whitelisted mint ${mint} (top10Pct=${top10Pct}%)`);
-    } else {
-      return `top10 concentration ${top10Pct}% above maximum ${config.screening.maxTop10Pct}%`;
-    }
+    return `top10 concentration ${top10Pct}% above maximum ${config.screening.maxTop10Pct}%`;
   }
   if (Number.isFinite(botPct) && botPct > config.screening.maxBotHoldersPct) {
     return `bot holders ${botPct}% above maximum ${config.screening.maxBotHoldersPct}%`;
@@ -1996,7 +1815,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is picking and deploying...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, bins_above=0 (single-side SOL pins upper bin to active), and bins_below from positive volatility. Execute now, don't ask.`,
+          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"
