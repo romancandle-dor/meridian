@@ -214,7 +214,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      liveMessage = await createLiveMessage("😺 management cycle", "evaluating positions...");
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -296,21 +296,25 @@ export async function runManagementCycle({ silent = false } = {}) {
       const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
       const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
 
-      // Status (action > OOR > stay)
+      // Status emoji per position (cute + informative)
       let status;
       if (act.action === "CLOSE" && act.rule === "exit") {
-        status = "⚡ TP";
+        status = "🎯 TP";
       } else if (act.action === "CLOSE") {
-        status = "❌ close";
+        status = "👋 close";
       } else if (act.action === "CLAIM") {
-        status = "💰 claim";
+        status = "💸 claim";
       } else if (act.action === "INSTRUCTION") {
-        status = "📋 eval";
+        status = "🤔 eval";
       } else if (!p.in_range) {
         const oorM = p.minutes_out_of_range != null ? p.minutes_out_of_range : 0;
-        status = `🔴 OOR ${oorM}m`;
+        status = `😾 OOR ${oorM}m`;
+      } else if ((p.pnl_pct ?? 0) > 0) {
+        status = "😺 hold";
+      } else if ((p.pnl_pct ?? 0) < 0) {
+        status = "🐱 hold";
       } else {
-        status = "🟢 stay";
+        status = "🌱 hold";
       }
 
       // Trim very long pair names
@@ -324,15 +328,42 @@ export async function runManagementCycle({ silent = false } = {}) {
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    const hasOor = positionData.some(p => !p.in_range && actionMap.get(p.position)?.action === "STAY");
+    const totalPnl = positionData.reduce((s, p) => s + (p.pnl_pct ?? 0), 0);
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => {
-          if (a.action === "CLOSE" && a.rule === "exit") return "⚡ TP";
-          if (a.action === "CLOSE") return `❌ ${a.reason || "close"}`;
-          if (a.action === "CLAIM") return "💰 claim";
-          if (a.action === "INSTRUCTION") return "📋 eval";
+          if (a.action === "CLOSE" && a.rule === "exit") return "🎯 TP";
+          if (a.action === "CLOSE") return `👋 ${a.reason || "close"}`;
+          if (a.action === "CLAIM") return "💸 claim";
+          if (a.action === "INSTRUCTION") return "🤔 eval";
           return a.action;
         }).join(" · ")
-      : "all stay";
+      : hasOor
+        ? "😵 some wobbling"
+        : totalPnl > 0
+          ? "😺 all purring"
+          : totalPnl < 0
+            ? "🫠 holding the dip"
+            : "🌙 vibing";
+
+    // Header mood emoji + tagline based on portfolio state
+    let headerEmoji, headerTag;
+    if (needsAction.length > 0) {
+      headerEmoji = "🛎️";
+      headerTag = "hustle time";
+    } else if (hasOor) {
+      headerEmoji = "😵";
+      headerTag = "wobbling a bit";
+    } else if (totalPnl > 0) {
+      headerEmoji = "😺";
+      headerTag = "purring";
+    } else if (totalPnl < 0) {
+      headerEmoji = "🫠";
+      headerTag = "holding the dip";
+    } else {
+      headerEmoji = "🌙";
+      headerTag = "vibing";
+    }
 
     // WIB = Asia/Jakarta (UTC+7). Format HH:MM.
     const wibTime = new Intl.DateTimeFormat("en-GB", {
@@ -342,7 +373,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       hour12: false,
     }).format(new Date());
     mgmtReport = [
-      `🔄 Management  ·  ${wibTime} WIB  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
+      `${headerEmoji} ${headerTag}  ·  ${wibTime} WIB  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
       "",
       ...blocks,
       "",
