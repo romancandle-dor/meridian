@@ -288,7 +288,8 @@ export async function runManagementCycle({ silent = false } = {}) {
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
     const cur = config.management.solMode ? "◎" : "$";
 
-    const blocks = positionData.map((p) => {
+    const blocks = positionData.map((p, i) => {
+      const num = `${i + 1}.`;
       const act = actionMap.get(p.position);
       const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
       const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
@@ -314,7 +315,9 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       // Trim very long pair names
       const pair = p.pair.length > 14 ? p.pair.slice(0, 13) + "…" : p.pair;
-      let b = `  ${pair.padEnd(14)}  ${pnl.padStart(7)}  ${val.padStart(8)}  fees ${fees.padStart(6)}  ${age.padStart(4)}  ${status}`;
+      // Number column pads to 2 chars so 1-9 align and 10+ still readable (rare)
+      const numCol = num.padStart(3);
+      let b = `  ${numCol} ${pair.padEnd(14)}  ${pnl.padStart(7)}  ${val.padStart(8)}  fees ${fees.padStart(6)}  ${age.padStart(4)}  ${status}`;
       if (p.instruction) b += `\n      📝 "${p.instruction}"`;
       if (act.action === "CLOSE" && act.reason && act.rule !== "exit") b += `\n      reason: ${act.reason}`;
       return b;
@@ -331,9 +334,15 @@ export async function runManagementCycle({ silent = false } = {}) {
         }).join(" · ")
       : "all stay";
 
-    const time = new Date().toUTCString().slice(17, 22);
+    // WIB = Asia/Jakarta (UTC+7). Format HH:MM.
+    const wibTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Jakarta",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date());
     mgmtReport = [
-      `🔄 Management  ·  ${time} UTC  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
+      `🔄 Management  ·  ${wibTime} WIB  ·  ${positions.length} position${positions.length === 1 ? "" : "s"}`,
       "",
       ...blocks,
       "",
