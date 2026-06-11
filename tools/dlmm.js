@@ -1094,13 +1094,13 @@ function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
-function getClosedPnlValue(posEntry, solMode = false) {
+export function getClosedPnlValue(posEntry, solMode = false) {
   return solMode
     ? maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative) ?? 0
     : maybeNum(posEntry?.pnlUsd) ?? maybeNum(posEntry?.pnl?.value) ?? 0;
 }
 
-function getClosedPnlPct(posEntry, solMode = false) {
+export function getClosedPnlPct(posEntry, solMode = false) {
   const reported = solMode
     ? maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative)
     : maybeNum(posEntry?.pnlPctChange) ?? maybeNum(posEntry?.pnl?.percent);
@@ -1113,7 +1113,7 @@ function getClosedPnlPct(posEntry, solMode = false) {
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
 }
 
-function deriveOpenPnlPct(binData, solMode = false) {
+export function deriveOpenPnlPct(binData, solMode = false) {
   if (!binData) return null;
 
   const deposit = solMode
@@ -1128,7 +1128,7 @@ function deriveOpenPnlPct(binData, solMode = false) {
 // Absolute PnL value via the explicit formula. Mirrors /home/ubuntu/meridian/scripts/lib/pnl.cjs.
 //   PnL = (balances + withdrawals + claimable + claimed) - deposits
 // USD: exact match vs Meteora per-position pnlUsd. SOL: small drift expected.
-function deriveOpenPnlValue(binData, solMode = false) {
+export function deriveOpenPnlValue(binData, solMode = false) {
   if (!binData) return 0;
   const balances = solMode
     ? safeNum(binData.unrealizedPnl?.balancesSol)
@@ -1324,6 +1324,15 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                 config.management.solMode
                   ? parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol || 0)
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
+              ) * 10000) / 10000
+            : null,
+          // Always-USD unclaimed fees (parallel to total_value_true_usd).
+          unclaimed_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
+            : binData
+            ? Math.round((
+                parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0)
+                + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
           total_value_usd:    lpData

@@ -285,7 +285,10 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
-    const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
+    // Total unclaimed in USD (always, independent of solMode).
+    const totalUnclaimedUsd = positionData.reduce((s, p) => s + (
+      p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : (p.unclaimed_fees_usd ?? 0)
+    ), 0);
     const cur = config.management.solMode ? "◎" : "$";
 
     const blocks = positionData.map((p, i) => {
@@ -293,7 +296,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       const act = actionMap.get(p.position);
       const val     = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
       const pnl     = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
-      const fees    = `${cur}${(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
+      // 'uang' = always USD (independent of solMode). Fall back to unclaimed_fees_usd if true_usd missing.
+      const feesUsd = p.unclaimed_fees_true_usd != null ? p.unclaimed_fees_true_usd : p.unclaimed_fees_usd;
+      const fees    = `$${(feesUsd ?? 0).toFixed(2)}`;
       const age     = p.age_minutes != null ? `${p.age_minutes}m` : "?m";
 
       // Status emoji per position (cute + informative)
@@ -377,7 +382,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       "",
       ...blocks,
       "",
-      `  bank  ${cur}${totalValue.toFixed(2)}  ·  uang  ${cur}${totalUnclaimed.toFixed(2)}  ·  ${actionSummary}`,
+      `  bank  ${cur}${totalValue.toFixed(2)}  ·  uang  $${totalUnclaimedUsd.toFixed(2)}  ·  ${actionSummary}`,
     ].join("\n");
 
     // ── Call LLM only if action needed ──────────────────────────────
