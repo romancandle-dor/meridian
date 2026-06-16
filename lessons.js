@@ -771,6 +771,39 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
 /**
  * Get performance stats summary.
  */
+export function getConsecutiveLosses() {
+  const data = load();
+  const p = data.performance;
+  let streak = 0;
+  for (let i = p.length - 1; i >= 0; i--) {
+    if (p[i].close_reason === 'LOW_YIELD') continue;
+    if (p[i].pnl_usd > 0) break;
+    streak++;
+  }
+  return streak;
+}
+
+export function circuitBreakerReset() {
+  const data = load();
+  const inserted = {
+    position: '__circuit_breaker_reset__',
+    pool_name: 'MANUAL_RESET',
+    pnl_pct: 1,
+    pnl_usd: 0.01,
+    close_reason: 'CIRCUIT_BREAKER_RESET',
+    range_efficiency: 100,
+    minutes_held: 1,
+    fees_earned_usd: 0,
+    initial_value_usd: 1,
+    final_value_usd: 1.01,
+    timestamp: Date.now(),
+  };
+  data.performance.push(inserted);
+  save(data);
+  log("lessons", "Circuit breaker reset — injected synthetic win to clear loss streak");
+  return true;
+}
+
 export function getPerformanceSummary() {
   const data = load();
   const p = data.performance;

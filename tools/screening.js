@@ -598,7 +598,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
     .slice(0, limit);
 
-  if (config.screening.avoidPvpSymbols && eligible.length > 0) {
+  if ((config.screening.avoidPvpSymbols || config.screening.blockPvpSymbols) && eligible.length > 0) {
     await enrichPvpRisk(eligible);
     if (config.screening.blockPvpSymbols) {
       const before = eligible.length;
@@ -607,6 +607,17 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       eligible.splice(0, eligible.length, ...eligible.filter((p) => !p.is_pvp));
       if (eligible.length < before) {
         log("screening", `PVP hard filter removed ${before - eligible.length} pool(s)`);
+      }
+    }
+    if (config.screening.avoidPvpSymbols) {
+      const pvpPools = eligible.filter((p) => p.is_pvp);
+      if (pvpPools.length > 0) {
+        const scored = eligible.sort((a, b) => {
+          if (a.is_pvp && !b.is_pvp) return 1;
+          if (!a.is_pvp && b.is_pvp) return -1;
+          return scoreCandidate(b) - scoreCandidate(a);
+        });
+        eligible.splice(0, eligible.length, ...scored);
       }
     }
   }

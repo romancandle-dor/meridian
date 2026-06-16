@@ -423,10 +423,12 @@ const BOT_COMMANDS = [
   { command: "screen",     description: "Refresh deterministic candidate list" },
   { command: "candidates", description: "Show latest cached candidates" },
   { command: "deploy",     description: "Deploy candidate by cached index" },
+  { command: "splitdeploy", description: "Split deploy into top N candidates" },
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
+  { command: "reset",      description: "Reset circuit breaker (consecutive losses)" },
   { command: "stop",       description: "Shut down agent" },
 ];
 
@@ -461,7 +463,7 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, volatility, feeTvlRatio, organicScore, entryMcap, entryTvl }) {
   if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
@@ -472,9 +474,16 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
+  const metrics = [
+    feeTvlRatio ? `Fee/TVL: ${feeTvlRatio}%` : null,
+    organicScore ? `Organic: ${organicScore}/100` : null,
+    entryMcap ? `MCap: $${(entryMcap / 1000).toFixed(0)}K` : null,
+    volatility ? `Vol: ${volatility}` : null,
+  ].filter(Boolean).join("  ");
   await sendHTML(
     `✅ <b>Deployed</b> ${pair}\n` +
     `Amount: ${amountSol} SOL\n` +
+    (metrics ? `${metrics}\n` : "") +
     priceStr +
     coverageStr +
     poolStr +
@@ -483,12 +492,33 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, reason, feesUsd, ageHours }) {
   if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
+  const net = pnlUsd ?? 0;
+  const fees = feesUsd ?? 0;
+  const price = net - fees; // net already includes fees → remainder is price/IL
+  const money = (n) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
+  const pctStr = `${(pnlPct ?? 0) >= 0 ? "+" : "-"}${Math.abs(pnlPct ?? 0).toFixed(2)}%`;
+  const dot = net > 0.5 ? "🟢" : net < -0.5 ? "🔴" : "⚪";
+
+  // Breakdown only meaningful when fees were earned
+  const breakdown = fees > 0
+    ? `\n   ├ Fees:     ${money(fees)}\n   └ Price/IL: ${money(price)}`
+    : "";
+  // Flag when fees masked a losing price leg (the "fake profit" case)
+  let tag = "";
+  if (fees > 0 && price < 0) {
+    if (net >= -0.5 && net <= 0.5) tag = "  ⚠️ break-even (fees only)";
+    else if (net > 0.5) tag = "  ⚠️ fees carried it";
+  }
+
+  const ageStr = ageHours ? `  Held: ${ageHours.toFixed(1)}h` : "";
+  const reasonStr = reason ? `\nReason: ${reason}` : "";
   await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `🔒 <b>Closed</b> ${pair} ${dot}\n` +
+    `Net: ${money(net)} (${pctStr})${ageStr}${tag}` +
+    breakdown +
+    reasonStr
   );
 }
 

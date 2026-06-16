@@ -8,8 +8,9 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
+import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getConsecutiveLosses } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -25,7 +26,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, dynamicOorWaitMinutes } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -41,6 +42,18 @@ const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const indexPath = fileURLToPath(import.meta.url);
 const isMain = process.env.pm_id != null
   || (entrypointPath ? path.resolve(entrypointPath) === indexPath : false);
+
+let _balanceCache = { sol: 0, at: 0 };
+const BALANCE_CACHE_TTL = 5 * 60 * 1000;
+async function getCachedBalance() {
+  if (Date.now() - _balanceCache.at < BALANCE_CACHE_TTL) return _balanceCache;
+  const bal = await getWalletBalances();
+  _balanceCache = { sol: bal.sol, at: Date.now() };
+  return _balanceCache;
+}
+function setCachedBalance(sol) {
+  _balanceCache = { sol, at: Date.now() };
+}
 
 if (isMain) {
   log("startup", "DLMM LP Agent starting...");
@@ -270,11 +283,12 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
 
-      const closeRule = getDeterministicCloseRule(p, config.management);
+      const closeRule = await getDeterministicCloseRule(p, config.management);
       if (closeRule) {
         actionMap.set(p.position, closeRule);
         continue;
       }
+
       // Claim rule
       if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         actionMap.set(p.position, { action: "CLAIM" });
@@ -286,29 +300,83 @@ export async function runManagementCycle({ silent = false } = {}) {
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
+    const cur = config.management.solMode ? "◎" : "$";
 
-    const reportLines = positionData.map((p) => {
+    const actionEmoji = (a) => {
+      if (a === "CLOSE") return "❌";
+      if (a === "CLAIM") return "💰";
+      if (a === "INSTRUCTION") return "📌";
+      return "📋";
+    };
+
+    const walletBal = await getWalletBalances().catch(() => null);
+    const walletSol = walletBal?.sol ?? 0;
+
+    const reportLines = positionData.map((p, i) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      const tracked = getTrackedPosition(p.position);
+      const inRange = p.in_range ? "🟢" : "🔴";
+      const oor = p.in_range ? "" : ` OOR ${p.minutes_out_of_range ?? 0}m`;
+      const val = `${cur}${(p.total_value_usd ?? 0).toFixed(2)}`;
+      const pnl = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` : "?";
+      const peakPnl = tracked?.peak_pnl_pct != null ? `Peak: +${tracked.peak_pnl_pct}%` : "";
+      const netUsd = (p.pnl_pct != null && p.total_value_usd != null)
+        ? (p.total_value_usd * p.pnl_pct / (100 + p.pnl_pct)) : null;
+      const pnlUsd = netUsd != null ? `${netUsd >= 0 ? "+" : "-"}${cur}${Math.abs(netUsd).toFixed(2)}` : "";
+      const yield_ = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h}%` : "?";
+      const unclaimed = p.unclaimed_fees_usd ?? 0;
+      const feesClaimed = tracked?.total_fees_claimed_usd ?? 0;
+      const feesTotal = feesClaimed + unclaimed; // all fees this position earned
+      // net PnL already includes fees → price/IL is the remainder
+      const priceLeg = netUsd != null ? netUsd - feesTotal : null;
+      const fees = unclaimed > 0 ? `💰${cur}${unclaimed.toFixed(2)}` : "";
+      const claimedStr = feesClaimed > 0 ? `Claimed: ${cur}${feesClaimed.toFixed(2)}` : "";
+      const label = act.action === "INSTRUCTION" ? "📌 HOLD" : `${actionEmoji(act.action)} ${act.action}`;
+      const ageMin = p.age_minutes ?? 0;
+      const ageStr = ageMin >= 60 ? `${(ageMin / 60).toFixed(1)}h` : `${ageMin}m`;
+      let line = `${i + 1}. ${inRange} **${p.pair}**  ${val}  ${pnl}${pnlUsd ? ` (${pnlUsd})` : ""}`;
+      // Fee vs price split — only when fees earned and they meaningfully mask the price leg
+      if (feesTotal > 0 && priceLeg != null) {
+        const flag = priceLeg < 0 && netUsd >= 0 ? " ⚠️" : "";
+        line += `\n   ├ Fee: ${cur}${feesTotal.toFixed(2)}  Price/IL: ${priceLeg >= 0 ? "+" : "-"}${cur}${Math.abs(priceLeg).toFixed(2)}${flag}`;
+      }
+      line += `\n   ${feesTotal > 0 ? "└ " : ""}Yield: ${yield_}/d  ${fees}  ${claimedStr}  Age: ${ageStr}${oor}`;
+      if (peakPnl) line += `  ${peakPnl}`;
+      if (p.instruction) line += `\n   📝 "${p.instruction}"`;
+      if (act.action === "CLOSE") line += `\n   ⚡ ${act.rule === "exit" ? act.reason : `Rule ${act.rule}: ${act.reason}`}`;
+      line += `\n   ${label}`;
       return line;
     });
 
     const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
-      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
-      : "no action";
+      ? needsAction.map(a => a.action === "INSTRUCTION" ? "📌 EVAL" : `${actionEmoji(a.action)} ${a.action}`).join(" · ")
+      : "✅ no action";
 
-    const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    // Aggregate net PnL and fee split across all open positions
+    const totalNet = positionData.reduce((s, p) => {
+      const n = (p.pnl_pct != null && p.total_value_usd != null)
+        ? p.total_value_usd * p.pnl_pct / (100 + p.pnl_pct) : 0;
+      return s + n;
+    }, 0);
+    const totalFeesAll = positionData.reduce((s, p) => {
+      const claimed = getTrackedPosition(p.position)?.total_fees_claimed_usd ?? 0;
+      return s + claimed + (p.unclaimed_fees_usd ?? 0);
+    }, 0);
+    const totalPriceLeg = totalNet - totalFeesAll;
+    const netStr = `${totalNet >= 0 ? "+" : "-"}${cur}${Math.abs(totalNet).toFixed(2)}`;
+    const splitStr = totalFeesAll > 0
+      ? `  PnL: ${netStr} (fee ${cur}${totalFeesAll.toFixed(2)} · px ${totalPriceLeg >= 0 ? "+" : "-"}${cur}${Math.abs(totalPriceLeg).toFixed(2)})`
+      : `  PnL: ${netStr}`;
+
+    mgmtReport =
+      `💼 **${positions.length}/${config.risk.maxPositions}** · ${cur}${totalValue.toFixed(2)}  Wallet: ${cur}${walletSol.toFixed(2)}` +
+      (totalUnclaimed > 0 ? `  Unclaimed: ${cur}${totalUnclaimed.toFixed(2)}` : "") +
+      splitStr +
+      `\n${"─".repeat(30)}` +
+      `\n${reportLines.join("\n")}` +
+      `\n${"─".repeat(30)}` +
+      `\n${actionSummary}`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -373,7 +441,8 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const oorWait = dynamicOorWaitMinutes(p, config.management.outOfRangeWaitMinutes);
+        if (!p.in_range && p.minutes_out_of_range >= oorWait) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }
@@ -395,7 +464,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let liveMessage = null;
   let screenReport = null;
   try {
-    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getCachedBalance()]);
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
@@ -428,6 +497,22 @@ export async function runScreeningCycle({ silent = false } = {}) {
     _screeningBusy = false;
     return screenReport;
   }
+
+  // Loss streak circuit breaker — halt deploy after 3 consecutive losses
+  const consecutiveLosses = getConsecutiveLosses();
+  if (consecutiveLosses >= 3) {
+    log("cron", `Screening blocked — ${consecutiveLosses} consecutive losses (circuit breaker)`);
+    screenReport = `🛑 <b>Screening blocked</b> — ${consecutiveLosses} consecutive losses. Circuit breaker active. Human review required.`;
+    appendDecision({
+      type: "skip",
+      actor: "SCREENER",
+      summary: "Circuit breaker active",
+      reason: `${consecutiveLosses} consecutive losses — halt until human review`,
+    });
+    _screeningBusy = false;
+    return screenReport;
+  }
+
   if (!silent && telegramEnabled()) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
   }
@@ -476,9 +561,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
-    // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
+    // Hard filters after token recon — block launchpads, holder concentration, bot holders
     const filteredOut = [];
-    const passing = allCandidates.filter(({ pool, ti }) => {
+    let passing = allCandidates.filter(({ pool, ti }) => {
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -497,8 +582,34 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
       }
+      const top10Pct = ti?.audit?.top_holders_pct;
+      const maxTop10Pct = config.screening.maxTop10Pct;
+      if (top10Pct != null && maxTop10Pct != null && top10Pct > maxTop10Pct) {
+        log("screening", `Holder cluster gate: dropped ${pool.name} — top10 ${top10Pct}% > ${maxTop10Pct}%`);
+        filteredOut.push({ name: pool.name, reason: `holder concentration ${top10Pct}% > ${maxTop10Pct}%` });
+        return false;
+      }
       return true;
     });
+
+    // Filter out pools that already have an open position
+    const existingPositions = prePositions?.positions || [];
+    const deployedPoolSet = new Set(existingPositions.map(p => p.pool));
+    const deployedMintSet = new Set(existingPositions
+      .filter(p => p.base_mint)
+      .map(p => p.base_mint));
+    const notDeployed = passing.filter(({ pool, ti }) => {
+      const poolAddr = pool?.pool_address || pool?.pool;
+      const mint = pool?.base?.mint; // ti has launchpad/audit info, base_mint on pool obj
+      if (poolAddr && deployedPoolSet.has(poolAddr)) return false;
+      if (mint && deployedMintSet.has(mint)) return false;
+      return true;
+    });
+    const skippedDeployed = passing.length - notDeployed.length;
+    if (skippedDeployed > 0) {
+      log("screening", `Skipped ${skippedDeployed} candidate(s) already deployed`);
+    }
+    passing = notDeployed;
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
@@ -620,8 +731,8 @@ STEPS:
 3. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*(${config.strategy.maxBinsBelow - config.strategy.minBinsBelow})) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
    pass deploy_position.volatility = the candidate volatility value.
-   For single-side SOL deploys, do not invent upside:
-   set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
+    For single-side SOL deploys:
+    set amount_y only, keep amount_x = 0, keep bins_above = 0.
 4. Report in this exact format (no tables, no extra sections):
    🚀 DEPLOYED
 
@@ -795,7 +906,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
-        const closeRule = getDeterministicCloseRule(p, config.management);
+        const closeRule = await getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
@@ -888,7 +999,7 @@ function formatCandidates(candidates) {
   ].join("\n");
 }
 
-function getDeterministicCloseRule(position, managementConfig) {
+async function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
   const pnlSuspect = (() => {
     // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
@@ -902,10 +1013,36 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  const slOorOk = !managementConfig.stopLossOnlyWhenOor || position.in_range === false;
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct && slOorOk) {
+    return { action: "CLOSE", rule: 1, reason: `stop loss${managementConfig.stopLossOnlyWhenOor ? " (OOR only)" : ""}` };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  // Rule 2 (ladder) — close when peak PnL hit the first rung.
+  // Skip for wide-range (>80 bins) — signal-based exit via LLM instead
+  const totalBins = (position.upper_bin ?? 0) - (position.lower_bin ?? 0);
+  const isWideRange = totalBins > 80;
+  if (
+    !pnlSuspect &&
+    !isWideRange &&
+    managementConfig.tpLadderEnabled &&
+    Array.isArray(managementConfig.tpLadderLevels) &&
+    managementConfig.tpLadderLevels.length > 0 &&
+    position.peak_pnl_pct != null &&
+    position.peak_pnl_pct >= managementConfig.tpLadderLevels[0]
+  ) {
+    return {
+      action: "CLOSE",
+      rule: 2,
+      reason: `tp ladder (+${managementConfig.tpLadderLevels[0]}%)`,
+    };
+  }
+  // Rule 2b (fallback single TP) — only when ladder is disabled
+  if (
+    !pnlSuspect &&
+    !managementConfig.tpLadderEnabled &&
+    position.pnl_pct != null &&
+    position.pnl_pct >= managementConfig.takeProfitPct
+  ) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
   if (
@@ -919,7 +1056,7 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    (position.minutes_out_of_range ?? 0) >= dynamicOorWaitMinutes(position, managementConfig.outOfRangeWaitMinutes)
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
@@ -929,6 +1066,33 @@ function getDeterministicCloseRule(position, managementConfig) {
     (position.age_minutes ?? 0) >= 60
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
+  }
+  // Rule 6 — indicator-based exit (wide-range only, bypasses TP ladder)
+  if (isWideRange && config.indicators.enabled) {
+    const mint = tracked?.base_mint || position.base_mint || position.mint;
+    if (mint) {
+      try {
+        const ind = await confirmIndicatorPreset({ mint, side: "exit" });
+        if (ind.enabled && ind.confirmed) {
+          // Profit floor: don't close at breakeven (bleeds gas+swap fees).
+          // Close on signal only if we're in profit OR the bounce failed (OOR).
+          // Otherwise hold in-range — let it keep earning fees / wait for bounce.
+          // Stop-loss (Rule 1) + OOR (Rule 4) still cap downside.
+          const floor = config.management.signalExitMinProfitPct ?? 1;
+          const inProfit = position.pnl_pct != null && position.pnl_pct >= floor;
+          const bounceFailed = position.in_range === false;
+          if (!pnlSuspect && (inProfit || bounceFailed)) {
+            return { action: "CLOSE", rule: 6, reason: `indicator exit (${ind.preset})` };
+          }
+          log(
+            "cron",
+            `Rule 6 signal exit for ${position.pair} held: pnl=${position.pnl_pct}% < floor ${floor}% and still in-range — waiting for profit or OOR`,
+          );
+        }
+      } catch (e) {
+        log("cron_warn", `Indicator exit check failed for ${position.pair}: ${e.message}`);
+      }
+    }
   }
   return null;
 }
@@ -993,6 +1157,7 @@ function formatConfigSnapshot() {
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `TP ladder: ${config.management.tpLadderEnabled ? `on (rungs ${config.management.tpLadderLevels.join("/")}%)` : "off"}`,
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
@@ -1080,7 +1245,7 @@ function renderSettingsMenu(page = "main") {
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Strategy: ${config.strategy.strategy} | bins ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | deploy ${config.management.deployAmountSol} SOL`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
+    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}%${config.management.stopLossOnlyWhenOor ? " (OOR)" : ""} | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
@@ -1109,6 +1274,7 @@ function renderSettingsMenu(page = "main") {
       stepButtons("maxDeployAmount", "Max SOL", 1, { digits: 0 }),
       stepButtons("takeProfitPct", "TP %", 1, { digits: 0 }),
       stepButtons("stopLossPct", "SL %", 5, { digits: 0 }),
+      [toggleButton("stopLossOnlyWhenOor", "SL OOR only")],
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
       stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
@@ -1273,11 +1439,13 @@ function formatHelpText() {
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
+    "/splitdeploy <n> — split deploy into top N candidates (up to maxPositions)",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
+    "/reset — reset circuit breaker (if ≥3 consecutive losses)",
     "/stop — shut down agent",
   ].join("\n");
 }
@@ -1333,14 +1501,13 @@ async function deployLatestCandidate(index) {
       throw new Error(`NO DEPLOY: only cached candidate ${candidate.name} is not worth deploying — ${skipReason}`);
     }
   }
-  const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
+  const deployAmount = computeDeployAmount((await getCachedBalance()).sol);
   const binsBelow = computeBinsBelow(candidate.volatility);
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
     strategy: config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: 0,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,
@@ -1353,6 +1520,7 @@ async function deployLatestCandidate(index) {
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
+  _balanceCache.at = 0; // invalidate after deploy
   return { result, candidate, deployAmount, binsBelow };
 }
 
@@ -1485,6 +1653,7 @@ async function telegramHandler(msg) {
       await sendMessage(`Closing ${pos.pair}...`);
       const result = await closePosition({ position_address: pos.position });
       if (result.success) {
+        _balanceCache.at = 0; // invalidate after close
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
         await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
@@ -1504,6 +1673,7 @@ async function telegramHandler(msg) {
       for (const pos of positions) {
         try {
           const result = await closePosition({ position_address: pos.position });
+          _balanceCache.at = 0; // invalidate after close
           results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
@@ -1583,6 +1753,83 @@ async function telegramHandler(msg) {
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
+    return;
+  }
+
+  const splitDeployMatch = text.match(/^\/splitdeploy\s+(\d+)$/i);
+  if (splitDeployMatch) {
+    try {
+      const n = parseInt(splitDeployMatch[1]);
+      if (n < 2) throw new Error("Split deploy needs at least 2 candidates. Use /deploy for single.");
+
+      const candidates = _latestCandidates.slice(0, n);
+      if (candidates.length < n) throw new Error(`Only ${candidates.length} candidates cached. Run /screen first for at least ${n}.`);
+      if (candidates.length > config.risk.maxPositions) {
+        throw new Error(`maxPositions is ${config.risk.maxPositions}, can't split into ${candidates.length} positions.`);
+      }
+
+      const balance = await getCachedBalance();
+      const totalDeploy = computeDeployAmount(balance.sol);
+      const perAmount = Math.max(0.1, parseFloat((totalDeploy / candidates.length).toFixed(2)));
+
+      const bidAskAmount = Math.round(perAmount * 0.8 * 10000) / 10000;
+      const spotAmount = Math.round(perAmount * 0.2 * 10000) / 10000;
+
+      await sendMessage(`🔄 Splitting ${totalDeploy} SOL across ${candidates.length} candidates (~${perAmount} SOL each: 80% bid_ask + 20% spot)...`).catch(() => {});
+
+      const results = [];
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        try {
+          const binsBelow = computeBinsBelow(c.volatility);
+          const deployArgs = {
+            pool_address: c.pool,
+            amount_y: bidAskAmount,
+            strategy: "bid_ask",
+            bins_below: binsBelow,
+            pool_name: c.name,
+            base_mint: c.base?.mint || c.base_mint || null,
+            bin_step: c.bin_step,
+            base_fee: c.base_fee,
+            volatility: c.volatility,
+            fee_tvl_ratio: c.fee_active_tvl_ratio ?? c.fee_tvl_ratio,
+            organic_score: c.organic_score,
+            initial_value_usd: c.tvl ?? c.active_tvl ?? null,
+          };
+          const result = await executeTool("deploy_position", deployArgs);
+          if (result?.success === false || result?.error) {
+            results.push(`❌ #${i + 1} ${c.name}: ${result.error}`);
+          } else if (spotAmount > 0.01 && result.position) {
+            try {
+              const addResult = await executeTool("add_liquidity_to_position", {
+                position_address: result.position,
+                amount_sol: spotAmount,
+                strategy: "spot",
+              });
+              results.push(`✅ #${i + 1} ${c.name}: ${bidAskAmount} SOL bid_ask + ${spotAmount} SOL spot`);
+            } catch (addErr) {
+              results.push(`⚠️ #${i + 1} ${c.name}: bid_ask done (${bidAskAmount} SOL), spot ${spotAmount} SOL failed: ${addErr.message}`);
+            }
+          } else {
+            results.push(`✅ #${i + 1} ${c.name}: ${result.position || "done"}`);
+          }
+        } catch (e) {
+          results.push(`❌ #${i + 1} ${c.name}: ${e.message}`);
+        }
+      }
+      _balanceCache.at = 0;
+      await sendMessage(`Split deploy results:\n${results.join("\n")}`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/reset") {
+    const reset = circuitBreakerReset();
+    await sendMessage(reset
+      ? "🔌 Circuit breaker reset. Deployments resumed."
+      : "No circuit breaker active.").catch(() => {});
     return;
   }
 
@@ -1831,7 +2078,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is picking and deploying...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, bins_above=0, and bins_below from positive volatility. Execute now, don't ask.`,
+          `get_top_candidates and deploy only if a candidate is clearly worth it. If there is only one weak candidate, report NO DEPLOY. For a valid deploy, use amount_y=${DEPLOY}, amount_x=0, and bins_below from positive volatility (bins_above auto-computes). Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"

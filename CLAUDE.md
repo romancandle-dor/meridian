@@ -433,3 +433,32 @@ When scheduling work, follow the **`_busy` flag + cooldown** pattern. `_manageme
 - Changing deploy/close behavior → `tools/dlmm.js` (the SDK wrapper) and `tools/executor.js` (the post-tool side effects + Telegram notify + auto-swap).
 - Discord listener issues → `discord-listener/pre-checks.js`.
 - HiveMind protocol issues → `hivemind.js` (push side) and `lessons.js#getLessonsForPrompt` (pull side injection).
+
+---
+
+## Session log — 2026-06-14
+
+**Changes made:**
+1. **Bug fix** — `tools/executor.js:16` — added missing `getTrackedPosition` import from `../state.js`. Was causing `ReferenceError` crash every management cycle.
+2. **Heap limit** — `ecosystem.config.cjs` — added `node_args: "--max-old-space-size=256"`.
+3. **Cooldown tuning** — `user-config.json`:
+   - `oorCooldownTriggerCount`: 3 → 2
+   - `oorCooldownHours`: 2 → 4
+   - `repeatDeployCooldownScope`: "pool" → "both"
+4. **Intervals** — `user-config.json`: `managementIntervalMin` 5→10, `screeningIntervalMin` 10→20.
+5. **Darwin** — `user-config.json`: `darwinEnabled` false → true.
+6. **Timing entry** — `user-config.json`: `timingEntry.enabled` false → true (waits for -8% dump).
+7. **HiveMind** — `user-config.json`: set explicit URL + API key (was null).
+8. **Trailing** — `user-config.json`: `trailingTriggerPct` 3→5, `trailingDropPct` 1.5→2.
+9. **Range** — `user-config.json`: `defaultBinsBelow` 100→120, `maxBinsBelow` 100→150.
+
+**User profile:** max 2 positions, 5 SOL/deploy, solMode, bid_ask strategy, deepseek models, Helius RPC.
+**Also running Charon** — `pm2 start /home/ubuntu/charon-bot/index.js --name charon`, dry_run mode, LLM off, GMGN signals, SQLite 81MB+.
+
+## Session log — 2026-06-14 (late)
+**Changes made:**
+10. **Dynamic OOR wait (5-15 min)** — `state.js` + `index.js`:
+    - Added `dynamicOorWaitMinutes(positionData, baseWait)` helper → scales wait time based on OOR bin distance (0 bins = 15m, 10+ bins = 5m).
+    - Replaced all 3 `outOfRangeWaitMinutes` checks (state.js OOR exit, index.js Rule 4, Telegram notification) with the dynamic function.
+    - `outOfRangeWaitMinutes` in config serves as the `baseWait` param (currently 15).
+    - Restart counter: 91.

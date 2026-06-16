@@ -9,6 +9,7 @@ module.exports = {
       script: path.join(repoRoot, "index.js"),
       cwd: repoRoot,
       interpreter: "node",
+      node_args: "--max-old-space-size=256",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,

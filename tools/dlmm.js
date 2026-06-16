@@ -548,15 +548,6 @@ export async function deployPosition({
   if (finalAmountY <= 0) {
     throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
   }
-  const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
-  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
-    throw new Error(
-      "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
-    );
-  }
-  if (isSingleSidedSol) {
-    activeBinsAbove = 0;
-  }
   activeBinsBelow = Number(activeBinsBelow);
   activeBinsAbove = Number(activeBinsAbove);
   if (!Number.isFinite(activeBinsBelow) || !Number.isFinite(activeBinsAbove)) {
@@ -596,15 +587,10 @@ export async function deployPosition({
 
   const isWideRange = totalBins > 69;
   const minBinId = activeBin.binId - activeBinsBelow;
-  const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+  const maxBinId = activeBin.binId + activeBinsAbove;
 
   if (minBinId > maxBinId) {
     throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
-  }
-  if (isSingleSidedSol && maxBinId !== activeBin.binId) {
-    throw new Error(
-      `Single-side SOL deploy must end at the SDK active bin. Expected ${activeBin.binId}, got ${maxBinId}.`,
-    );
   }
 
   await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
@@ -1056,13 +1042,13 @@ function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
   return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
 }
 
-function getClosedPnlValue(posEntry, solMode = false) {
+export function getClosedPnlValue(posEntry, solMode = false) {
   return solMode
     ? maybeNum(posEntry?.pnlSol) ?? maybeNum(posEntry?.pnl?.valueNative) ?? 0
     : maybeNum(posEntry?.pnlUsd) ?? maybeNum(posEntry?.pnl?.value) ?? 0;
 }
 
-function getClosedPnlPct(posEntry, solMode = false) {
+export function getClosedPnlPct(posEntry, solMode = false) {
   const reported = solMode
     ? maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative)
     : maybeNum(posEntry?.pnlPctChange) ?? maybeNum(posEntry?.pnl?.percent);
@@ -1075,9 +1061,7 @@ function getClosedPnlPct(posEntry, solMode = false) {
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
 }
 
-function deriveOpenPnlPct(binData, solMode = false) {
-  if (!binData) return null;
-
+function openPnlComponents(binData, solMode) {
   const deposit = solMode
     ? safeNum(binData.allTimeDeposits?.total?.sol)
     : safeNum(binData.allTimeDeposits?.total?.usd);
@@ -1096,8 +1080,19 @@ function deriveOpenPnlPct(binData, solMode = false) {
     ? safeNum(binData.allTimeFees?.total?.sol)
     : safeNum(binData.allTimeFees?.total?.usd);
 
-  const pnl = balances + unclaimedFees + withdrawals + fees - deposit;
-  return (pnl / deposit) * 100;
+  return { deposit, pnl: balances + unclaimedFees + withdrawals + fees - deposit };
+}
+
+export function deriveOpenPnlValue(binData, solMode = false) {
+  if (!binData) return 0;
+  const c = openPnlComponents(binData, solMode);
+  return c ? c.pnl : 0;
+}
+
+export function deriveOpenPnlPct(binData, solMode = false) {
+  if (!binData) return null;
+  const c = openPnlComponents(binData, solMode);
+  return c ? (c.pnl / c.deposit) * 100 : null;
 }
 
 function deriveLpAgentPnlPct(lpData, solMode = false) {
@@ -1320,6 +1315,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          peak_pnl_pct:       tracked?.peak_pnl_pct ?? null,
         });
       }
     }
@@ -1441,6 +1437,56 @@ export async function searchPools({ query, limit = 10 }) {
   };
 }
 
+/** Estimate pending fee USD from position data + pool active bin price */
+let _cachedSolPrice = null;
+let _cachedSolPriceAt = 0;
+async function estimatePendingFeeUsd(lbPosition, pool) {
+  try {
+    const feeX = lbPosition.positionData.feeX;
+    const feeY = lbPosition.positionData.feeY;
+    const feeXNum = typeof feeX?.toNumber === "function" ? feeX.toNumber() : 0;
+    const feeYNum = typeof feeY?.toNumber === "function" ? feeY.toNumber() : 0;
+    if (feeXNum <= 0 && feeYNum <= 0) return 0;
+
+    const WSOL_MINT = "So11111111111111111111111111111111111111112";
+    const tokenXMint = pool.lbPair?.tokenXMint?.toString();
+    const tokenYMint = pool.lbPair?.tokenYMint?.toString();
+    const tokenXDecimals = pool.tokenX?.mint?.decimals ?? 9;
+    const tokenYDecimals = pool.tokenY?.mint?.decimals ?? 9;
+
+    const activeBin = await pool.getActiveBin();
+    const pricePerToken = parseFloat(activeBin?.pricePerToken ?? "0");
+    if (!pricePerToken || pricePerToken <= 0) return 0;
+
+    const toSolValue = (rawAmount, decimals, mint) => {
+      const tokens = rawAmount / Math.pow(10, decimals);
+      if (mint === WSOL_MINT) return tokens;
+      return mint === tokenXMint ? tokens * pricePerToken : tokens / pricePerToken;
+    };
+
+    let totalSol = 0;
+    if (feeXNum > 0) totalSol += toSolValue(feeXNum, tokenXDecimals, tokenXMint);
+    if (feeYNum > 0) totalSol += toSolValue(feeYNum, tokenYDecimals, tokenYMint);
+
+    let solPriceUsd = config?.tokens?.solPriceUsd;
+    if (!solPriceUsd) {
+      if (!_cachedSolPrice || Date.now() - _cachedSolPriceAt > 120_000) {
+        try {
+          const priceRes = await fetch("https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112");
+          const priceData = await priceRes.json();
+          _cachedSolPrice = parseFloat(priceData?.data?.So11111111111111111111111111111111111111112?.price ?? 0);
+          _cachedSolPriceAt = Date.now();
+        } catch { /* use fallback */ }
+      }
+      solPriceUsd = _cachedSolPrice > 0 ? _cachedSolPrice : 70;
+    }
+    return Math.round(totalSol * solPriceUsd * 100) / 100;
+  } catch (e) {
+    log("fee_estimate_warn", `Fee USD estimate failed: ${e.message}`);
+    return 0;
+  }
+}
+
 // ─── Claim Fees ────────────────────────────────────────────────
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
@@ -1461,10 +1507,14 @@ export async function claimFees({ position_address }) {
     poolCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
 
-    const positionData = await pool.getPosition(new PublicKey(position_address));
+    const lbPosition = await pool.getPosition(new PublicKey(position_address));
+
+    // Estimate fee USD before claiming
+    const feeUsd = await estimatePendingFeeUsd(lbPosition, pool);
+
     const txs = await pool.claimSwapFee({
       owner: wallet.publicKey,
-      position: positionData,
+      position: lbPosition,
     });
 
     if (!txs || txs.length === 0) {
@@ -1478,9 +1528,9 @@ export async function claimFees({ position_address }) {
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
     _positionsCacheAt = 0; // invalidate cache after claim
-    recordClaim(position_address);
+    recordClaim(position_address, feeUsd || undefined);
 
-    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
+    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), fees_claimed_usd: feeUsd };
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };
@@ -1762,12 +1812,14 @@ export async function closePosition({ position_address, reason }) {
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+    let closeFeeUsd = 0;
     try {
       if (recentlyClaimed) {
         log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
       } else {
         log("close", `Step 1: Claiming fees for ${position_address}`);
         const positionData = await pool.getPosition(positionPubKey);
+        closeFeeUsd = await estimatePendingFeeUsd(positionData, pool);
         const claimTxs = await pool.claimSwapFee({
           owner: wallet.publicKey,
           position: positionData,
@@ -1778,6 +1830,9 @@ export async function closePosition({ position_address, reason }) {
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
+        }
+        if (closeFeeUsd > 0) {
+          recordClaim(position_address, closeFeeUsd);
         }
       }
     } catch (e) {
@@ -2049,6 +2104,78 @@ export async function closePosition({ position_address, reason }) {
     };
   } catch (error) {
     log("close_error", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ─── Add Liquidity to Existing Position ───────────────────────
+export async function addLiquidityToPosition({ position_address, amount_sol, strategy }) {
+  position_address = normalizeMint(position_address);
+  const tracked = getTrackedPosition(position_address);
+  if (!tracked) {
+    return { success: false, error: `Position ${position_address.slice(0, 8)} not found in state` };
+  }
+
+  const poolAddress = tracked.pool;
+  const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
+  const pool = await getPool(poolAddress);
+  const wallet = getWallet();
+  const activeBin = await pool.getActiveBin();
+
+  const activeBinsBelow = tracked.bin_range?.bins_below ?? config.strategy.defaultBinsBelow ?? 35;
+  const activeBinsAbove = tracked.bin_range?.bins_above ?? 0;
+  const minBinId = activeBin.binId - activeBinsBelow;
+  const maxBinId = tracked.bin_range?.max ?? activeBin.binId + activeBinsAbove;
+
+  const strategyMap = {
+    spot: StrategyType.Spot,
+    curve: StrategyType.Curve,
+    bid_ask: StrategyType.BidAsk,
+  };
+  const strategyType = strategyMap[strategy || tracked.strategy];
+  if (strategyType === undefined) {
+    return { success: false, error: `Invalid strategy: ${strategy || tracked.strategy}` };
+  }
+
+  const finalAmountY = Number(amount_sol ?? 0);
+  if (!Number.isFinite(finalAmountY) || finalAmountY <= 0) {
+    return { success: false, error: "Invalid amount_sol: must be a positive number" };
+  }
+
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, would_add: { position: position_address, pool: poolAddress, amount_sol: finalAmountY, strategy: strategy || tracked.strategy } };
+  }
+
+  const totalYLamports = new BN(Math.floor(finalAmountY * 1e9));
+  const totalXLamports = new BN(0);
+
+  try {
+    const addTxs = await pool.addLiquidityByStrategyChunkable({
+      positionPubKey: new PublicKey(position_address),
+      user: wallet.publicKey,
+      totalXAmount: totalXLamports,
+      totalYAmount: totalYLamports,
+      strategy: { minBinId, maxBinId, strategyType },
+      slippage: 10,
+    });
+    const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+    const txHashes = [];
+    for (let i = 0; i < addTxArray.length; i++) {
+      const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+      txHashes.push(txHash);
+    }
+
+    _positionsCacheAt = 0;
+
+    return {
+      success: true,
+      position: position_address,
+      pool: poolAddress,
+      amount_sol_added: finalAmountY,
+      txs: txHashes,
+    };
+  } catch (error) {
+    log("add_liquidity_error", error.message);
     return { success: false, error: error.message };
   }
 }

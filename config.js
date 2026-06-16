@@ -126,7 +126,20 @@ export const config = {
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    // TP ladder — "green is green" (per byJamesMarston Meteora guide).
+    // When enabled, close position when pnl first crosses the lowest ladder rung.
+    // Trailing still runs as safety net for positions that don't hit a rung.
+    tpLadderEnabled:       u.tpLadderEnabled       ?? false,
+    tpLadderLevels:        Array.isArray(u.tpLadderLevels) && u.tpLadderLevels.length > 0
+                             ? u.tpLadderLevels.map(Number).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b)
+                             : [2, 5, 10],
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Only trigger stop loss when position is already out of range
+    stopLossOnlyWhenOor:   u.stopLossOnlyWhenOor   ?? false,
+    // Rule 6 signal exit (wide-range): min PnL% before a supertrend/indicator
+    // exit will close. Below this, hold in-range (don't bleed gas at breakeven);
+    // only close on signal if OOR (bounce failed). Stop-loss/OOR still cap downside.
+    signalExitMinProfitPct: u.signalExitMinProfitPct ?? 1,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
@@ -173,6 +186,8 @@ export const config = {
     SOL:  "So11111111111111111111111111111111111111112",
     USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    // 0 or empty = live price from Jupiter; set a number to override
+    solPriceUsd: 0,
   },
 
   // ─── HiveMind ─────────────────────────
@@ -251,11 +266,11 @@ export const config = {
 export function computeDeployAmount(walletSol) {
   const reserve  = config.management.gasReserve      ?? 0.2;
   const pct      = config.management.positionSizePct ?? 0.35;
-  const floor    = config.management.deployAmountSol;
+  const target   = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
-  const result     = Math.min(ceil, Math.max(floor, dynamic));
+  const result     = Math.min(ceil, Math.min(target, Math.max(0, dynamic)));
   return parseFloat(result.toFixed(2));
 }
 

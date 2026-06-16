@@ -249,10 +249,21 @@ export function resolvePendingPeak(position_address, currentPnlPct, toleranceRat
   if (!pos || pos.closed || pos.pending_peak_pnl_pct == null) return { confirmed: false, pending: false };
 
   const pendingPeak = pos.pending_peak_pnl_pct;
+
+  // RPC fail — trust the pending peak from the earlier valid RPC call
+  if (currentPnlPct == null) {
+    pos.peak_pnl_pct = Math.max(pos.peak_pnl_pct ?? 0, pendingPeak);
+    pos.pending_peak_pnl_pct = null;
+    pos.pending_peak_started_at = null;
+    save(state);
+    log("state", `Position ${position_address} peak PnL confirmed at ${pos.peak_pnl_pct.toFixed(2)}% (RPC null — trusted pending)`);
+    return { confirmed: true, peak: pos.peak_pnl_pct };
+  }
+
   pos.pending_peak_pnl_pct = null;
   pos.pending_peak_started_at = null;
 
-  if (currentPnlPct != null && currentPnlPct >= pendingPeak * toleranceRatio) {
+  if (currentPnlPct >= pendingPeak * toleranceRatio) {
     pos.peak_pnl_pct = Math.max(pos.peak_pnl_pct ?? 0, pendingPeak, currentPnlPct);
     save(state);
     log("state", `Position ${position_address} peak PnL confirmed at ${pos.peak_pnl_pct.toFixed(2)}% after recheck`);
@@ -260,7 +271,7 @@ export function resolvePendingPeak(position_address, currentPnlPct, toleranceRat
   }
 
   save(state);
-  log("state", `Position ${position_address} rejected pending peak ${pendingPeak.toFixed(2)}% after 15s recheck (current: ${currentPnlPct ?? "?"}%)`);
+  log("state", `Position ${position_address} rejected pending peak ${pendingPeak.toFixed(2)}% after 15s recheck (current: ${currentPnlPct != null ? currentPnlPct.toFixed(2) : "?"}%)`);
   return { confirmed: false, rejected: true, pendingPeak };
 }
 
@@ -300,13 +311,24 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   const pendingPeak = pos.pending_trailing_peak_pnl_pct;
   const pendingDrop = pos.pending_trailing_drop_pct ?? (pendingPeak - pendingCurrent);
 
+  // RPC fail — trust the drop from the earlier valid RPC call
+  if (currentPnlPct == null) {
+    pos.pending_trailing_current_pnl_pct = null;
+    pos.pending_trailing_peak_pnl_pct = null;
+    pos.pending_trailing_drop_pct = null;
+    pos.pending_trailing_started_at = null;
+    save(state);
+    log("state", `Position ${position_address} trailing drop confirmed (RPC null — trusted pending: peak ${pendingPeak.toFixed(2)}% → current ${pendingCurrent.toFixed(2)}%, drop ${pendingDrop.toFixed(2)}%)`);
+    return { confirmed: true, reason: `Trailing TP (RPC null fallback): peak ${pendingPeak.toFixed(2)}% → ${pendingCurrent.toFixed(2)}%` };
+  }
+
   pos.pending_trailing_current_pnl_pct = null;
   pos.pending_trailing_peak_pnl_pct = null;
   pos.pending_trailing_drop_pct = null;
   pos.pending_trailing_started_at = null;
 
-  const stillNearCrash = currentPnlPct != null && currentPnlPct <= pendingCurrent + tolerancePct;
-  const stillDroppedEnough = currentPnlPct != null && (pendingPeak - currentPnlPct) >= trailingDropPct;
+  const stillNearCrash = currentPnlPct <= pendingCurrent + tolerancePct;
+  const stillDroppedEnough = (pendingPeak - currentPnlPct) >= trailingDropPct;
 
   if (stillNearCrash && stillDroppedEnough) {
     const reason = `Trailing TP: peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${trailingDropPct}%)`;
@@ -371,6 +393,25 @@ export function getStateSummary() {
 }
 
 /**
+ * Compute dynamic OOR wait (5-15 min) based on how far price is from range.
+ * Further OOR = shorter wait (faster capital rotation).
+ * Defaults to baseWait when bin info is unavailable.
+ */
+export function dynamicOorWaitMinutes(positionData, baseWait = 15) {
+  const { active_bin, upper_bin, lower_bin } = positionData;
+  if (active_bin == null) return baseWait;
+  let binsOor = 0;
+  if (upper_bin != null && active_bin > upper_bin) {
+    binsOor = active_bin - upper_bin;
+  } else if (lower_bin != null && active_bin < lower_bin) {
+    binsOor = lower_bin - active_bin;
+  }
+  if (binsOor <= 0) return baseWait;
+  const clampedBins = Math.min(binsOor, 10);
+  return Math.max(5, Math.round(baseWait - (clampedBins / 10) * (baseWait - 5)));
+}
+
+/**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
  * @param {string} position_address
@@ -418,11 +459,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
-  // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+  // ── Stop loss (only when OOR if stopLossOnlyWhenOor is set) ──
+  const slOorOk = !mgmtConfig.stopLossOnlyWhenOor || in_range === false;
+  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct && slOorOk) {
     return {
       action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${mgmtConfig.stopLossOnlyWhenOor ? " (OOR only)" : ""}`,
     };
   }
 
@@ -441,13 +483,14 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Out of range too long ──────────────────────────────────────
+  // ── Out of range too long (dynamic 5-15 min based on bin distance) ──
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
-    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
+    const oorWait = dynamicOorWaitMinutes(positionData, mgmtConfig.outOfRangeWaitMinutes);
+    if (minutesOOR >= oorWait) {
       return {
         action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
+        reason: `Out of range for ${minutesOOR}m (limit: ${oorWait}m, bins OOR)`,
       };
     }
   }
