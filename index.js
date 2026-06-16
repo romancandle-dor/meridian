@@ -442,11 +442,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const deployStrategy = config.strategy.strategy;
-    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
+    const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (single-side SOL) | deposit: SOL only (amount_y, amount_x=0)`
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
 
-    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-    const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+    // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s.
+    // Hard 90s timeout — a hung candidate fetch must not wedge the screening lock
+    // (withTimeout resolves null on expiry, and the finally{} below releases _screeningBusy).
+    const topCandidates = await withTimeout(
+      getTopCandidates({ limit: 10 }).catch(() => null),
+      90_000
+    );
+    if (topCandidates === null) {
+      log("cron", "Screening aborted — candidate fetch timed out (90s)");
+    }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
 
@@ -594,7 +602,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
-    const { content } = await agentLoop(`
+    // Wrap the screener LLM loop in a hard 5-minute timeout. deepseek-chat has
+    // hung mid-cycle before with no provider-side timeout, leaving _screeningBusy
+    // stuck true and starving deploys. On expiry withTimeout resolves null; we
+    // treat that as a no-deploy cycle and let finally{} release the lock.
+    const agentResult = await withTimeout(agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -671,7 +683,11 @@ IMPORTANT:
           }
           await liveMessage?.toolFinish(name, result, success);
         },
-      });
+      }), 300_000);
+    if (agentResult === null) {
+      log("cron", "Screening aborted — agent loop timed out (300s)");
+    }
+    const content = agentResult?.content ?? "⛔ NO DEPLOY\n\nCycle aborted — screener agent timed out (300s).";
     screenReport = content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
