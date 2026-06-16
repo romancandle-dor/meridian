@@ -408,6 +408,47 @@ export function evolveThresholds(perfData, config) {
     }
   }
 
+  // ── 3. minFeePerTvl24h (management) ───────────────────────────
+  // Auto-adjust yield close threshold based on performance.
+  // PINNED OVERRIDE: when user-config sets `_pinMinFeePerTvl24h: true`, this
+  // field is locked and auto-evolve must not touch it. The deterministic
+  // clamp here caps at 5.0, which was silently dragging a user-set 7 back
+  // down every evolution cycle (the 7→4 ping-pong). Honor the pin instead.
+  if (!config.management._pinMinFeePerTvl24h) {
+    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
+    const current    = config.management.minFeePerTvl24h;
+
+    if (winnerFees.length >= 2 && loserFees.length >= 2) {
+      const avgWinnerFee = avg(winnerFees);
+      const avgLoserFee  = avg(loserFees);
+      const minWinnerFee = Math.min(...winnerFees);
+      const maxLoserFee  = Math.max(...loserFees);
+
+      // Winners had higher fee yield → raise threshold to be more selective
+      if (avgWinnerFee > avgLoserFee * 1.3 && minWinnerFee > current * 1.1) {
+        const target  = Math.min(minWinnerFee * 0.85, avgWinnerFee * 0.7);
+        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 5.0);
+        const rounded = Number(newVal.toFixed(1));
+        if (rounded > current) {
+          changes.minFeePerTvl24h = rounded;
+          rationale.minFeePerTvl24h = `Winners avg fee ${avgWinnerFee.toFixed(2)}% > losers ${avgLoserFee.toFixed(2)}% — raised from ${current} → ${rounded}`;
+        }
+      }
+
+      // Losers had high fee yield but still lost → lower threshold, yield isn't the issue
+      if (avgLoserFee > avgWinnerFee * 0.8 && avgLoserFee > current * 1.5) {
+        const target  = current * 0.7;
+        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 5.0);
+        const rounded = Number(newVal.toFixed(1));
+        if (rounded < current && !changes.minFeePerTvl24h) {
+          changes.minFeePerTvl24h = rounded;
+          rationale.minFeePerTvl24h = `Losers had high fee ${avgLoserFee.toFixed(2)}% but still lost — lowered from ${current} → ${rounded}`;
+        }
+      }
+    }
+  }
+
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json ───────────────────────
@@ -426,6 +467,7 @@ export function evolveThresholds(perfData, config) {
   const s = config.screening;
   if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
   if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
+  if (changes.minFeePerTvl24h  != null) config.management.minFeePerTvl24h = changes.minFeePerTvl24h;
 
   // Log a lesson summarizing the evolution
   const data = load();
