@@ -29,6 +29,14 @@ signal-weights.json
 
 # Logs
 logs/
+*.log
+
+# Local backups & ad-hoc scratch
+*.bak
+*.bak-*
+*.bak.*
+user-config.bak.*
+_cd.cjs
 
 # OS
 .DS_Store
