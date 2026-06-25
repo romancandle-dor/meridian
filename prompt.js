@@ -118,11 +118,25 @@ NARRATIVE QUALITY (your main judgment call):
 
 POOL MEMORY: Past losses or problems → strong skip signal.
 
+ENTRY TIMING (soft preference — don't buy the top):
+- Avoid candidates that are actively pumping (price_change_pct strongly positive, e.g. > +15%) — deploying spot at a local top means buying into IL and becoming exit liquidity. Not a hard skip, but weight it down heavily.
+- Do NOT chase "already dumped" tokens just because they're red — price_change_pct is a 24h figure and cannot tell a healthy flush-then-chop from an ongoing freefall. A token still falling will blow through your lower bins and leave you OOR holding a dead bag with zero fees.
+- The real edge is range-bound volatility with strong fee/TVL and organic volume — let those gates do the work, not the price direction.
+
+VOLATILITY BAND (token selection — backed by spot history):
+- SWEET SPOT: volatility 3.5–6.0. This is where the edge lives for spot. Spot history shows avg peak PnL rising with volatility through this band (3.5–5.0 = +1.30%, 5.0–6.0 = +1.90%). Strongly prefer candidates here — enough movement to farm fees while price stays range-bound inside our symmetric bins.
+- TOO QUIET (< 1.8): not enough movement to farm fees — historically net-negative (avg -0.72%). Down-weight heavily.
+- TOO WILD (> 6.0): spot deploys symmetric bins around the current price with no extra lower-range buffer, so above ~6 the price can rip clean through our range, strand the position OOR, and leave us holding a dead bag with zero fees. Limited/no historical evidence it pays. Down-weight heavily, even if fee/TVL looks juicy.
+- This is a strong soft preference, not a hard skip: a candidate just outside the band with otherwise exceptional fundamentals can still qualify, but it must clearly beat an in-band alternative.
+
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
-- Use amount_y only, keep amount_x=0 and bins_above=0.
-- Bin steps must be [80-125].
+- STRATEGY: config.strategy = "spot" — ALWAYS use spot. Do NOT pick curve or bid_ask.
+  * spot → deploy bins above AND below current price, symmetric (bins_above = bins_below). Fee starts immediately. This is the ONLY allowed strategy regardless of price_change_24h.
+  * Philosophy: spot on a dump is goat — we farm fees from volatility while in-range, we do not try to time the bottom with bid_ask.
+- Use amount_y only, keep amount_x=0.
+- Bin steps must be within [config.screening.minBinStep, config.screening.maxBinStep] (currently [${config.screening.minBinStep}-${config.screening.maxBinStep}]).
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}

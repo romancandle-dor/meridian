@@ -83,6 +83,10 @@ export function getHiveMindPullMode() {
 }
 
 export function isHiveMindEnabled() {
+  // User-toggle override (Jun21): if user-config sets hiveMindEnabled=false,
+  // hard-disable regardless of url/apiKey presence. Lets user opt out without
+  // blanking hardcoded DEFAULT_HIVEMIND_URL/API_KEY fallbacks in config.js.
+  if (config.hiveMind?.enabled === false) return false;
   return !!(getBaseUrl() && getApiKey());
 }
 

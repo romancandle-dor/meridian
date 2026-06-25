@@ -1,3 +1,5 @@
+import { config } from "../config.js";
+
 const toolDefinitions = [
   // ═══════════════════════════════════════════
   //  SCREENING TOOLS
@@ -133,7 +135,7 @@ PRIORITY ORDER for strategy and bins:
 
 HARD RULES:
 - Never use 'curve'.
-- Bin Step: Only deploy in pools with bin_step between 80 and 125.
+- Bin Step: Only deploy in pools with bin_step between ${config.screening.minBinStep} and ${config.screening.maxBinStep}.
 - Volatility must be positive. If volatility is 0, null, or missing, do not deploy.
 - Range must cover at least 35 total bins. Never deploy 1-bin/tiny ranges.
 - For single-side SOL deploys (amount_y only, amount_x=0), bins_above should be 0. The upper bin

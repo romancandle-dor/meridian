@@ -113,6 +113,8 @@ export function trackPosition({
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
     trailing_active: false,
+    // Hold-until-profit safety net tracking
+    tvl_dead_since: null,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -459,13 +461,102 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
-  // ── Stop loss (only when OOR if stopLossOnlyWhenOor is set) ──
-  const slOorOk = !mgmtConfig.stopLossOnlyWhenOor || in_range === false;
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct && slOorOk) {
+  // ── Stop loss with bounce hold buffer (only when OOR if stopLossOnlyWhenOor is set) ──
+  const holdMode = mgmtConfig.holdUntilProfit === true;
+  let slTriggered = false;
+
+  // ── Stop loss — DISABLED in hold-until-profit mode ──
+  // In hold mode, depth safety (PnL ≤ holdUntilProfitDepthLossPct) replaces SL.
+  // Bounce-hold SL buffer is also skipped (mutually exclusive with hold mode).
+  if (!holdMode) {
+    const slOorOk = !mgmtConfig.stopLossOnlyWhenOor || in_range === false;
+    if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct && slOorOk) {
+      slTriggered = true;
+      const holdMin = mgmtConfig.stopLossHoldMinutes ?? 30;
+      const now = Date.now();
+
+      // First time hitting SL — set hold buffer and skip close
+      if (!pos.sl_hold_until) {
+        pos.sl_hold_until = now + holdMin * 60_000;
+        pos.sl_trigger_pnl_pct = currentPnlPct;
+        save(state);
+        log("state", `Position ${position_address} entered SL bounce-hold (${holdMin}m) — PnL ${currentPnlPct.toFixed(2)}% awaiting bounce or escalation`);
+        return null;
+      }
+
+      // During hold: check hard-CLOSE bypass conditions
+      const triggerPnl = pos.sl_trigger_pnl_pct ?? currentPnlPct;
+      const lossDeepened = (triggerPnl - currentPnlPct) > 10;
+      const tvlCollapsed = fee_per_tvl_24h != null && fee_per_tvl_24h < 2;
+      const holdExpired = now >= pos.sl_hold_until;
+
+      if (lossDeepened || tvlCollapsed || holdExpired) {
+        delete pos.sl_hold_until;
+        delete pos.sl_trigger_pnl_pct;
+        save(state);
+        const bypass = lossDeepened ? " (loss deepened 10%+)" : tvlCollapsed ? " (TVL collapsed)" : ` (held ${holdMin}m, no bounce)`;
+        return {
+          action: "STOP_LOSS",
+          reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${mgmtConfig.stopLossOnlyWhenOor ? " (OOR only)" : ""}${bypass}`,
+        };
+      }
+
+      // Bounce detected — cancel hold
+      if (currentPnlPct > triggerPnl + 1) {
+        log("state", `Position ${position_address} SL hold cancelled — bounce ${triggerPnl.toFixed(2)}% → ${currentPnlPct.toFixed(2)}%`);
+        delete pos.sl_hold_until;
+        delete pos.sl_trigger_pnl_pct;
+        save(state);
+        return null;
+      }
+
+      // Still in hold — no action
+      return null;
+    }
+
+    // Clear hold state if PnL recovers above SL threshold
+    if (pos.sl_hold_until && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct > mgmtConfig.stopLossPct) {
+      log("state", `Position ${position_address} SL hold cleared — PnL ${currentPnlPct.toFixed(2)}% above SL ${mgmtConfig.stopLossPct}%`);
+      delete pos.sl_hold_until;
+      delete pos.sl_trigger_pnl_pct;
+      save(state);
+    }
+  }
+
+  // ── Hold-until-profit: depth safety ──────────────────────────────
+  // Catastrophic loss exit. Bounded downside in hold mode — replaces SL.
+  if (holdMode && !pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.holdUntilProfitDepthLossPct != null && currentPnlPct <= mgmtConfig.holdUntilProfitDepthLossPct) {
+    delete pos.tvl_dead_since;
     return {
-      action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%${mgmtConfig.stopLossOnlyWhenOor ? " (OOR only)" : ""}`,
+      action: "DEPTH_SAFETY",
+      reason: `Hold-mode depth safety: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.holdUntilProfitDepthLossPct}% (catastrophic — pool unsalvageable)`,
     };
+  }
+
+  // ── Hold-until-profit: TVL/fee safety net ──────────────────────
+  // Pool "dead" = fee/TVL 24h below threshold sustained for N hours.
+  // Uses fee/TVL as a proxy (already in positionData) instead of raw TVL diff.
+  if (holdMode && fee_per_tvl_24h != null && mgmtConfig.holdUntilProfitTvlThreshold != null && fee_per_tvl_24h < mgmtConfig.holdUntilProfitTvlThreshold) {
+    const now = Date.now();
+    if (!pos.tvl_dead_since) {
+      pos.tvl_dead_since = new Date(now).toISOString();
+      save(state);
+      log("state", `Position ${position_address} TVL-dead timer started (fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < ${mgmtConfig.holdUntilProfitTvlThreshold}%)`);
+    } else {
+      const deadHours = (now - new Date(pos.tvl_dead_since).getTime()) / 3600000;
+      if (deadHours >= (mgmtConfig.holdUntilProfitTvlHours ?? 4)) {
+        delete pos.tvl_dead_since;
+        return {
+          action: "TVL_DEAD",
+          reason: `Hold-mode TVL safety: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < ${mgmtConfig.holdUntilProfitTvlThreshold}% for ${deadHours.toFixed(1)}h (pool dead)`,
+        };
+      }
+    }
+  } else if (holdMode && pos.tvl_dead_since) {
+    // fee/TVL recovered — clear dead timer
+    log("state", `Position ${position_address} TVL-dead timer cleared (fee/TVL recovered)`);
+    delete pos.tvl_dead_since;
+    save(state);
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
@@ -483,8 +574,32 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
+  // ── Profit floor (Jun21) ───────────────────────────────────────
+  // Once a position has proven itself (peak ≥ trigger), lock a hard floor
+  // so it can NEVER close below `profitFloorLockPct`. Catches the case where
+  // trailing drop wouldn't fire fast enough and price falls back to a loss.
+  // Checked AFTER trailing (so trailing wins when both apply — higher exit
+  // is better) but BEFORE other exits so this acts as a last-line floor.
+  if (
+    !pnl_pct_suspicious &&
+    mgmtConfig.profitFloorEnabled === true &&
+    mgmtConfig.profitFloorTriggerPct != null &&
+    mgmtConfig.profitFloorLockPct != null &&
+    pos.peak_pnl_pct != null &&
+    currentPnlPct != null &&
+    pos.peak_pnl_pct >= mgmtConfig.profitFloorTriggerPct &&
+    currentPnlPct <= mgmtConfig.profitFloorLockPct
+  ) {
+    return {
+      action: "PROFIT_FLOOR",
+      reason: `Profit floor: peak ${pos.peak_pnl_pct.toFixed(2)}% ≥ ${mgmtConfig.profitFloorTriggerPct}%, current ${currentPnlPct.toFixed(2)}% ≤ floor ${mgmtConfig.profitFloorLockPct}% (lock activated)`,
+    };
+  }
+
   // ── Out of range too long (dynamic 5-15 min based on bin distance) ──
-  if (pos.out_of_range_since) {
+  // SKIPPED in hold-until-profit mode — a bleeding position that goes OOR is
+  // held to wait for the bounce back into range (TVL_DEAD handles truly dead pools).
+  if (!holdMode && pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
     const oorWait = dynamicOorWaitMinutes(positionData, mgmtConfig.outOfRangeWaitMinutes);
     if (minutesOOR >= oorWait) {
@@ -496,17 +611,37 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Low yield (only after position has had time to accumulate fees) ───
+  // In NON-hold mode: fires regardless of PnL (original behaviour).
+  // In HOLD mode: still fires, BUT only when the position is at/above breakeven
+  //   (currentPnlPct >= 0). This rotates capital out of pools whose post-deploy
+  //   24h fee/TVL is below threshold ("pool not worth it") WITHOUT ever realizing
+  //   a loss — losing positions stay held for the bounce (TVL_DEAD net catches
+  //   truly dead pools). Implements the user's intent: wait minAge, judge yield,
+  //   drop the unworthy — without breaking hold-until-profit downside protection.
   const { age_minutes } = positionData;
-  const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
-  if (
-    fee_per_tvl_24h != null &&
-    mgmtConfig.minFeePerTvl24h != null &&
-    fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
-    (age_minutes == null || age_minutes >= minAgeForYieldCheck)
-  ) {
+  const yieldGateAllowed = !holdMode || (currentPnlPct != null && currentPnlPct >= 0);
+  if (yieldGateAllowed) {
+    const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
+    if (
+      fee_per_tvl_24h != null &&
+      mgmtConfig.minFeePerTvl24h != null &&
+      fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
+      (age_minutes == null || age_minutes >= minAgeForYieldCheck)
+    ) {
+      return {
+        action: "LOW_YIELD",
+        reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m, PnL ${currentPnlPct == null ? "?" : currentPnlPct.toFixed(2)}% — rotating green capital)`,
+      };
+    }
+  }
+
+  // ── Hold-until-profit: profit target ────────────────────────────
+  // Primary exit in hold mode — close when PnL crosses profit floor.
+  if (holdMode && !pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.holdUntilProfitMinPct != null && currentPnlPct >= mgmtConfig.holdUntilProfitMinPct) {
+    delete pos.tvl_dead_since;
     return {
-      action: "LOW_YIELD",
-      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      action: "PROFIT_TARGET",
+      reason: `Hold-mode profit target hit: PnL ${currentPnlPct.toFixed(2)}% >= ${mgmtConfig.holdUntilProfitMinPct}%`,
     };
   }
 

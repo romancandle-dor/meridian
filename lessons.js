@@ -345,109 +345,29 @@ export function evolveThresholds(perfData, config) {
   const rationale = {};
 
   // ── 1. minFeeActiveTvlRatio ────────────────────────────────────
-  // Raise the floor if low-fee pools consistently underperform.
-  {
-    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeActiveTvlRatio;
-
-    if (winnerFees.length >= 2) {
-      // Minimum fee/TVL among winners — we know pools below this don't work for us
-      const minWinnerFee = Math.min(...winnerFees);
-      if (minWinnerFee > current * 1.2) {
-        const target  = minWinnerFee * 0.85; // stay slightly below min winner
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-        const rounded = Number(newVal.toFixed(2));
-        if (rounded > current) {
-          changes.minFeeActiveTvlRatio = rounded;
-          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
-        }
-      }
-    }
-
-    if (loserFees.length >= 2) {
-      // If losers all had high fee/TVL, that's noise (pumps then crash) — don't raise min
-      // But if losers had low fee/TVL, raise min
-      const maxLoserFee = Math.max(...loserFees);
-      if (maxLoserFee < current * 1.5 && winnerFees.length > 0) {
-        const minWinnerFee = Math.min(...winnerFees);
-        if (minWinnerFee > maxLoserFee) {
-          const target  = maxLoserFee * 1.2;
-          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-          const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeActiveTvlRatio) {
-            changes.minFeeActiveTvlRatio = rounded;
-            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
-          }
-        }
-      }
-    }
-  }
+  // AUTO-RAISE DISABLED (Jun21, user decision). The old logic raised the
+  // fee floor whenever winners had high fee/TVL. In a narrow universe this
+  // is a self-freeze: win → floor up → fewer eligible pools → fewer at-bats
+  // → eventually floor exceeds the best available pool's fee/TVL and the bot
+  // never deploys again (same class as Charon's CONFIDENCE_CEILING deadlock).
+  // Success ratchets the gate shut. minFeeActiveTvlRatio is now MANUAL-ONLY —
+  // change it via `node cli.js config set minFeeActiveTvlRatio <n>`.
+  // (block intentionally left as a no-op)
 
   // ── 2. minOrganic ─────────────────────────────────────────────
-  // Raise organic floor if low-organic tokens consistently failed.
-  {
-    const loserOrganics  = losers.map((p) => p.organic_score).filter(isFiniteNum);
-    const winnerOrganics = winners.map((p) => p.organic_score).filter(isFiniteNum);
-    const current        = config.screening.minOrganic;
-
-    if (loserOrganics.length >= 2 && winnerOrganics.length >= 1) {
-      const avgLoserOrganic  = avg(loserOrganics);
-      const avgWinnerOrganic = avg(winnerOrganics);
-      // Only raise if there's a clear gap (winners consistently more organic)
-      if (avgWinnerOrganic - avgLoserOrganic >= 10) {
-        // Set floor just below worst winner
-        const minWinnerOrganic = Math.min(...winnerOrganics);
-        const target = Math.max(minWinnerOrganic - 3, current);
-        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 60, 90);
-        if (newVal > current) {
-          changes.minOrganic = newVal;
-          rationale.minOrganic = `Winner avg organic ${avgWinnerOrganic.toFixed(0)} vs loser avg ${avgLoserOrganic.toFixed(0)} — raised from ${current} → ${newVal}`;
-        }
-      }
-    }
-  }
+  // AUTO-EVOLVE DISABLED (Jun21, user decision). Was auto-raise only.
+  // Same self-freeze risk as §1: win → floor up → fewer eligible pools.
+  // minOrganic is now MANUAL-ONLY — change it via
+  // `node cli.js config set minOrganic <n>`.
+  // (block intentionally left as a no-op)
 
   // ── 3. minFeePerTvl24h (management) ───────────────────────────
-  // Auto-adjust yield close threshold based on performance.
-  // PINNED OVERRIDE: when user-config sets `_pinMinFeePerTvl24h: true`, this
-  // field is locked and auto-evolve must not touch it. The deterministic
-  // clamp here caps at 5.0, which was silently dragging a user-set 7 back
-  // down every evolution cycle (the 7→4 ping-pong). Honor the pin instead.
-  if (!config.management._pinMinFeePerTvl24h) {
-    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.management.minFeePerTvl24h;
-
-    if (winnerFees.length >= 2 && loserFees.length >= 2) {
-      const avgWinnerFee = avg(winnerFees);
-      const avgLoserFee  = avg(loserFees);
-      const minWinnerFee = Math.min(...winnerFees);
-      const maxLoserFee  = Math.max(...loserFees);
-
-      // Winners had higher fee yield → raise threshold to be more selective
-      if (avgWinnerFee > avgLoserFee * 1.3 && minWinnerFee > current * 1.1) {
-        const target  = Math.min(minWinnerFee * 0.85, avgWinnerFee * 0.7);
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 5.0);
-        const rounded = Number(newVal.toFixed(1));
-        if (rounded > current) {
-          changes.minFeePerTvl24h = rounded;
-          rationale.minFeePerTvl24h = `Winners avg fee ${avgWinnerFee.toFixed(2)}% > losers ${avgLoserFee.toFixed(2)}% — raised from ${current} → ${rounded}`;
-        }
-      }
-
-      // Losers had high fee yield but still lost → lower threshold, yield isn't the issue
-      if (avgLoserFee > avgWinnerFee * 0.8 && avgLoserFee > current * 1.5) {
-        const target  = current * 0.7;
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 1.0, 5.0);
-        const rounded = Number(newVal.toFixed(1));
-        if (rounded < current && !changes.minFeePerTvl24h) {
-          changes.minFeePerTvl24h = rounded;
-          rationale.minFeePerTvl24h = `Losers had high fee ${avgLoserFee.toFixed(2)}% but still lost — lowered from ${current} → ${rounded}`;
-        }
-      }
-    }
-  }
+  // AUTO-EVOLVE DISABLED (Jun21, user decision). Was bidirectional
+  // (auto-raise on winners + auto-lower on losers). User wants this FLAT —
+  // raise and lower both removed. Change manually via
+  // `node cli.js config set minFeePerTvl24h <n>` if a new case warrants it.
+  // (block intentionally left as a no-op; _pinMinFeePerTvl24h check no longer
+  // needed since the block does nothing, kept in config for backwards compat)
 
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
@@ -776,7 +696,30 @@ export function getConsecutiveLosses() {
   const p = data.performance;
   let streak = 0;
   for (let i = p.length - 1; i >= 0; i--) {
-    if (p[i].close_reason === 'LOW_YIELD') continue;
+    // Skip *managed* exits — these are trailing-TP/rotation cuts the system
+    // makes on purpose (low fee yield, drifted out of range), NOT thesis-break
+    // losses. The circuit breaker exists to halt on genuine losing streaks
+    // (stop-losses / hard negative closes), so managed micro-bleed must not
+    // count toward it.
+    // NOTE: close_reason is stored as a long descriptive string (e.g.
+    // "Trailing TP: Low yield - fee/TVL 0.49% ..."), so we substring-match
+    // the same way the rest of this file classifies reasons — the old exact
+    // `=== 'LOW_YIELD'` literal never matched and let managed exits trip the
+    // breaker (the spurious 3-loss halt on 2026-06-17).
+    const reason = String(p[i].close_reason || '').toLowerCase();
+    // Hard reset marker — a manual /reset injects this synthetic record.
+    // Everything BEFORE it is forgiven, so stop counting immediately.
+    // (Previously this was lumped into isManagedExit below and `continue`d,
+    //  which skipped the record instead of breaking the streak — so /reset
+    //  never actually cleared the breaker. Bug fixed 2026-06-21.)
+    if (reason === 'circuit_breaker_reset') break;
+    const isManagedExit =
+      reason.includes('low yield') ||
+      reason.includes('low_yield') ||
+      reason.includes('out of range') ||
+      reason.includes('oor') ||
+      reason.includes('trailing');
+    if (isManagedExit) continue;
     if (p[i].pnl_usd > 0) break;
     streak++;
   }

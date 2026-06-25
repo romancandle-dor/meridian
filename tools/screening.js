@@ -97,6 +97,17 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.excludeHighSupplyConcentration && pool?.base_token_has_high_supply_concentration === true) {
     return "base token has high supply concentration";
   }
+  // SOL-quote guard: bot deploys single-side SOL (amount_y), so the quote token
+  // (token_y) MUST be wrapped SOL. USDC-quoted pools (e.g. ZERO-USDC) can't take a
+  // SOL-only deposit — they reach deploy and fail simulation with "insufficient
+  // funds". Reject them at screening so they never become candidates. (Jun21)
+  {
+    const SOL_MINT = "So11111111111111111111111111111111111111112";
+    const quoteMint = quote?.address || quote?.mint || pool?.token_y_mint;
+    if (quoteMint && quoteMint !== SOL_MINT) {
+      return `quote token ${quote?.symbol || quoteMint} is not SOL (single-side SOL deploy needs SOL-quoted pool)`;
+    }
+  }
   if (pool?.base_token_has_critical_warnings === true) return "base token has critical warnings";
   if (pool?.quote_token_has_critical_warnings === true) return "quote token has critical warnings";
   if (pool?.base_token_has_high_single_ownership === true) return "base token has high single ownership";
@@ -318,15 +329,23 @@ async function enrichPvpRisk(pools) {
       symbolCache.set(symbol, assets);
     }
 
+    // Filter by the qualification gate (holders + fees) BEFORE slicing.
+    // Old order sliced top-N by liquidity first, then gated — so a valid rival
+    // ranked below N by liquidity (but passing holders+fees) was never evaluated.
+    // e.g. WEN: top-2 by liquidity both had <30 SOL fees, while the genuine
+    // qualifying rival (holders 906, fees 113 SOL) sat at rank 3 and got dropped.
     const rivalAssets = assets
       .filter((asset) => normalizeSymbol(asset?.symbol) === symbol && asset?.id && asset.id !== ownMint)
+      .filter((asset) =>
+        Number(asset?.holderCount || 0) >= PVP_MIN_HOLDERS &&
+        Number(asset?.fees || 0) >= PVP_MIN_GLOBAL_FEES_SOL
+      )
       .sort((a, b) => Number(b?.liquidity || 0) - Number(a?.liquidity || 0))
       .slice(0, PVP_RIVAL_LIMIT);
 
     for (const rival of rivalAssets) {
       const rivalHolders = Number(rival?.holderCount || 0);
       const rivalFees = Number(rival?.fees || 0);
-      if (rivalHolders < PVP_MIN_HOLDERS || rivalFees < PVP_MIN_GLOBAL_FEES_SOL) continue;
 
       const rivalPool = await findRivalPool(rival.id).catch(() => null);
       if (!rivalPool) continue;
@@ -635,6 +654,29 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
+  }
+
+  // GMGN fee enrichment — populates gmgn_total_fee_sol for minTokenFeesSol gate
+  if (eligible.length > 0) {
+    try {
+      const { getGmgnTokenFees, hasGmgnApiKey } = await import("./gmgn.js");
+      if (hasGmgnApiKey()) {
+        const gmgnResults = await Promise.allSettled(
+          eligible.map(async (p) => p.base?.mint ? getGmgnTokenFees(p.base.mint) : null)
+        );
+        let gmgnHits = 0;
+        for (let i = 0; i < eligible.length; i++) {
+          const r = gmgnResults[i];
+          if (r.status === "fulfilled" && r.value && Number.isFinite(r.value.total_fee)) {
+            eligible[i].gmgn_total_fee_sol = r.value.total_fee;
+            gmgnHits++;
+          }
+        }
+        if (gmgnHits > 0) log("screening", `GMGN fee enriched: ${gmgnHits}/${eligible.length} pools`);
+      }
+    } catch (err) {
+      log("screening", `GMGN enrichment skipped: ${err.message || err}`);
+    }
   }
 
   if (config.indicators.enabled && eligible.length > 0) {

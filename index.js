@@ -226,7 +226,7 @@ export async function runManagementCycle({ silent = false } = {}) {
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
-    if (!silent && telegramEnabled()) {
+    if (!silent && telegramEnabled() && config.schedule.notifyRoutineCycles) {
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
@@ -408,7 +408,12 @@ RULES:
 - CLOSE: call close_position only — it handles fee claiming internally, do NOT call claim_fees first
 - CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
-- ⚡ exit alerts: close immediately, no exceptions
+- ⚡ exit alerts: CLOSE by default, but HOLD IF position appears to be in a transient drawdown that may bounce. Hold criteria (ALL must be met):
+  • Loss < -30% (not catastrophic) AND loss > -5% (not trivial — trivial losses mean signal was false)
+  • Pool health intact: TVL retention ≥70% of entry TVL AND 1h organic volume still >50% of entry vol AND no large holder dump detected
+  • Bounce signals present: 15m price action showing reversal (higher lows, RSI recovery, or volume uptick)
+  • Hold max 30 minutes — if no bounce within 30 min, CLOSE on next cycle anyway
+- Hard CLOSE (no hold allowed): loss ≤ -50% OR TVL retention <50% OR zero organic volume for 10+ minutes OR rug-pull signature (mcap -70%+ in 1h)
 
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
@@ -438,7 +443,7 @@ After executing, write a brief one-line result per position.
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else if (config.schedule.notifyRoutineCycles) sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         const oorWait = dynamicOorWaitMinutes(p, config.management.outOfRangeWaitMinutes);
@@ -513,7 +518,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return screenReport;
   }
 
-  if (!silent && telegramEnabled()) {
+  if (!silent && telegramEnabled() && config.schedule.notifyRoutineCycles) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
   }
   timers.screeningLastRun = Date.now();
@@ -823,7 +828,7 @@ IMPORTANT:
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else if (config.schedule.notifyRoutineCycles) sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
   }
@@ -1014,7 +1019,8 @@ async function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   const slOorOk = !managementConfig.stopLossOnlyWhenOor || position.in_range === false;
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct && slOorOk) {
+  // SL disabled in hold-until-profit mode — depth-safety (-50%) in state.js is the only floor.
+  if (managementConfig.holdUntilProfit !== true && !pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct && slOorOk) {
     return { action: "CLOSE", rule: 1, reason: `stop loss${managementConfig.stopLossOnlyWhenOor ? " (OOR only)" : ""}` };
   }
   // Rule 2 (ladder) — close when peak PnL hit the first rung.
@@ -1040,6 +1046,7 @@ async function getDeterministicCloseRule(position, managementConfig) {
   if (
     !pnlSuspect &&
     !managementConfig.tpLadderEnabled &&
+    managementConfig.takeProfitPct != null &&
     position.pnl_pct != null &&
     position.pnl_pct >= managementConfig.takeProfitPct
   ) {
@@ -1063,30 +1070,42 @@ async function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= 60 &&
+    managementConfig.holdUntilProfit !== true // SKIPPED in hold-until-profit mode
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
   // Rule 6 — indicator-based exit (wide-range only, bypasses TP ladder)
-  if (isWideRange && config.indicators.enabled) {
+  // SKIPPED in hold-until-profit mode — depth safety + profit target handle exits.
+  const holdModeForRule6 = config.management?.holdUntilProfit === true;
+  if (isWideRange && config.indicators.enabled && !holdModeForRule6) {
     const mint = tracked?.base_mint || position.base_mint || position.mint;
     if (mint) {
       try {
         const ind = await confirmIndicatorPreset({ mint, side: "exit" });
         if (ind.enabled && ind.confirmed) {
           // Profit floor: don't close at breakeven (bleeds gas+swap fees).
-          // Close on signal only if we're in profit OR the bounce failed (OOR).
-          // Otherwise hold in-range — let it keep earning fees / wait for bounce.
-          // Stop-loss (Rule 1) + OOR (Rule 4) still cap downside.
+          // Require BOTH (inProfit OR OOR-beyond-grace) AND signalExitMinProfitPct.
+          // The old "inProfit || bounceFailed" OR logic let EVERY OOR close bypass
+          // the floor — on wide-range bid_ask, price exiting the tiny range triggers
+          // OOR in seconds, so every supertrend_break signal became an immediate
+          // breakeven exit. Now:
+          //   - If inProfit ≥ floor (1%) → close immediately.
+          //   - If OOR but pnl below floor → hold until PnL crosses floor OR
+          //     OOR exceeds signalExitOorGraceMinutes (default 60).
+          //   - Stop-loss (Rule 1) and ordinary OOR (Rule 4) still fire separately.
           const floor = config.management.signalExitMinProfitPct ?? 1;
           const inProfit = position.pnl_pct != null && position.pnl_pct >= floor;
-          const bounceFailed = position.in_range === false;
-          if (!pnlSuspect && (inProfit || bounceFailed)) {
+          const oorGraceMin = config.management.signalExitOorGraceMinutes ?? 60;
+          const oorMinutes = position.minutes_out_of_range ?? 0;
+          const oorBeyondGrace = position.in_range === false && oorMinutes >= oorGraceMin;
+          if (!pnlSuspect && (inProfit || oorBeyondGrace)) {
             return { action: "CLOSE", rule: 6, reason: `indicator exit (${ind.preset})` };
           }
+          const state = position.in_range === false ? `OOR ${oorMinutes}m` : "in-range";
           log(
             "cron",
-            `Rule 6 signal exit for ${position.pair} held: pnl=${position.pnl_pct}% < floor ${floor}% and still in-range — waiting for profit or OOR`,
+            `Rule 6 signal exit for ${position.pair} held: pnl=${position.pnl_pct ?? "null"}% < floor ${floor}%, ${state} — waiting for profit or OOR>=${oorGraceMin}m`,
           );
         }
       } catch (e) {
@@ -1094,11 +1113,26 @@ async function getDeterministicCloseRule(position, managementConfig) {
       }
     }
   }
+  // ── Profit floor (Jun21) — engine 2 mirror of state.js ──────────
+  // Once peak ≥ trigger, lock a hard floor: never close below lockPct.
+  if (
+    !pnlSuspect &&
+    managementConfig.profitFloorEnabled === true &&
+    managementConfig.profitFloorTriggerPct != null &&
+    managementConfig.profitFloorLockPct != null &&
+    position.peak_pnl_pct != null &&
+    position.pnl_pct != null &&
+    position.peak_pnl_pct >= managementConfig.profitFloorTriggerPct &&
+    position.pnl_pct <= managementConfig.profitFloorLockPct
+  ) {
+    return {
+      action: "CLOSE",
+      rule: 7,
+      reason: `profit floor (peak +${position.peak_pnl_pct.toFixed(1)}% ≥ ${managementConfig.profitFloorTriggerPct}%, locked ≥ ${managementConfig.profitFloorLockPct}%)`,
+    };
+  }
   return null;
 }
-
-// ═══════════════════════════════════════════
-//  INTERACTIVE REPL
 // ═══════════════════════════════════════════
 const isTTY = process.stdin.isTTY;
 let cronStarted = false;
@@ -1921,7 +1955,7 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   const smartWalletCount = Math.max(sw?.in_pool?.length ?? 0, Number(pool.gmgn_smart_wallets ?? 0) || 0);
   const tokenInfo = ti || {};
   const hasNarrative = !!n?.narrative;
-  const globalFeesSol = Number(tokenInfo.global_fees_sol ?? pool.gmgn_total_fee_sol);
+  const globalFeesSol = Number(pool.gmgn_total_fee_sol ?? tokenInfo.global_fees_sol);
   const top10Pct = Number(tokenInfo.audit?.top_holders_pct ?? pool.gmgn_token_info_top10_pct ?? pool.gmgn_top10_holder_pct);
   const botPct = Number(tokenInfo.audit?.bot_holders_pct ?? pool.gmgn_bot_degen_pct);
   if (pool.is_pvp && smartWalletCount === 0) return "PVP symbol conflict and no smart-wallet confirmation";

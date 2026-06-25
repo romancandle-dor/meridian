@@ -524,9 +524,11 @@ export async function deployPosition({
     spot: StrategyType.Spot,
     curve: StrategyType.Curve,
     bid_ask: StrategyType.BidAsk,
+    auto: StrategyType.Spot,  // "auto" resolves to spot as safe default
   };
 
-  const strategyType = strategyMap[activeStrategy];
+  const resolvedStrategy = activeStrategy === 'auto' ? 'spot' : activeStrategy;
+  const strategyType = strategyMap[resolvedStrategy];
   if (strategyType === undefined) {
     throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
   }
@@ -572,7 +574,7 @@ export async function deployPosition({
       dry_run: true,
       would_deploy: {
         pool_address,
-        strategy: activeStrategy,
+        strategy: resolvedStrategy,
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
@@ -629,7 +631,7 @@ export async function deployPosition({
           idempotencyKey: `deploy:${pool_address}:${minBinId}:${maxBinId}:${finalAmountY}:${finalAmountX}`,
           poolId: pool_address,
           owner: wallet.publicKey.toString(),
-          strategy: activeStrategy === "spot" ? "Spot" : "BidAsk",
+          strategy: resolvedStrategy === "spot" ? "Spot" : "BidAsk",
           inputSOL: finalAmountY,
           amountY: finalAmountY,
           amountX: finalAmountX,
@@ -662,7 +664,7 @@ export async function deployPosition({
           },
           meta: {
             pool: pool_address,
-            strategy: activeStrategy,
+            strategy: resolvedStrategy,
           },
         }),
       });
@@ -683,7 +685,7 @@ export async function deployPosition({
           position: positionAddress,
           pool: pool_address,
           pool_name,
-          strategy: activeStrategy,
+          strategy: resolvedStrategy,
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step,
           volatility: normalizedVolatility,
@@ -707,7 +709,7 @@ export async function deployPosition({
         pool: pool_address,
         pool_name,
         position: positionAddress,
-        summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+        summary: `Relay deployed ${finalAmountY} SOL with ${resolvedStrategy}`,
         reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
         risks: [
           normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
@@ -715,7 +717,7 @@ export async function deployPosition({
         ].filter(Boolean),
         metrics: {
           amount_sol: finalAmountY,
-          strategy: activeStrategy,
+          strategy: resolvedStrategy,
           active_bin: activeBin.binId,
           min_bin: minBinId,
           max_bin: maxBinId,
@@ -741,7 +743,7 @@ export async function deployPosition({
         },
         bin_step: actualBinStep,
         base_fee: actualBaseFee,
-        strategy: activeStrategy,
+        strategy: resolvedStrategy,
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
@@ -757,7 +759,7 @@ export async function deployPosition({
   const newPosition = Keypair.generate();
 
   log("deploy", `Pool: ${pool_address}`);
-  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+  log("deploy", `Strategy: ${resolvedStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
   log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
@@ -825,7 +827,7 @@ export async function deployPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
-      strategy: activeStrategy,
+      strategy: resolvedStrategy,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step,
       volatility: normalizedVolatility,
@@ -848,7 +850,7 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       position: newPosition.publicKey.toString(),
-      summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      summary: `Deployed ${finalAmountY} SOL with ${resolvedStrategy}`,
       reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
       risks: [
         normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
@@ -856,7 +858,7 @@ export async function deployPosition({
       ].filter(Boolean),
       metrics: {
         amount_sol: finalAmountY,
-        strategy: activeStrategy,
+        strategy: resolvedStrategy,
         active_bin: activeBin.binId,
         min_bin: minBinId,
         max_bin: maxBinId,
@@ -880,7 +882,7 @@ export async function deployPosition({
       },
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
-      strategy: activeStrategy,
+      strategy: resolvedStrategy,
       wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,

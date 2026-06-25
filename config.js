@@ -114,7 +114,7 @@ export const config = {
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
-    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
+    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? null,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     _pinMinFeePerTvl24h:   u._pinMinFeePerTvl24h   ?? false,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -126,6 +126,10 @@ export const config = {
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    // Profit floor — once peak ≥ trigger, lock a hard minimum exit (never close below lock).
+    profitFloorEnabled:    u.profitFloorEnabled     ?? false,
+    profitFloorTriggerPct: u.profitFloorTriggerPct  ?? 10,
+    profitFloorLockPct:    u.profitFloorLockPct      ?? 8,
     // TP ladder — "green is green" (per byJamesMarston Meteora guide).
     // When enabled, close position when pnl first crosses the lowest ladder rung.
     // Trailing still runs as safety net for positions that don't hit a rung.
@@ -136,10 +140,34 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // Only trigger stop loss when position is already out of range
     stopLossOnlyWhenOor:   u.stopLossOnlyWhenOor   ?? false,
+    // Bounce hold buffer: when SL triggers, hold for N minutes awaiting bounce before
+    // returning STOP_LOSS to LLM. Hard-CLOSE bypasses during hold if:
+    //   • PnL drops another 10% from trigger (loss deepening)
+    //   • fee/TVL 24h collapses below 2% (TVL drained)
+    //   • hold period expires
+    // Bounce cancels hold if PnL improves ≥1% above trigger.
+    stopLossHoldMinutes:   u.stopLossHoldMinutes   ?? 30,
     // Rule 6 signal exit (wide-range): min PnL% before a supertrend/indicator
-    // exit will close. Below this, hold in-range (don't bleed gas at breakeven);
-    // only close on signal if OOR (bounce failed). Stop-loss/OOR still cap downside.
+    // exit will close. Below this, hold until PnL≥floor OR OOR exceeds grace period.
+    // The OOR grace prevents the old bug where every 0.5m OOR on bid_ask bypassed the floor.
     signalExitMinProfitPct: u.signalExitMinProfitPct ?? 1,
+    signalExitOorGraceMinutes: u.signalExitOorGraceMinutes ?? 60,
+    // ── Hold-until-profit hybrid mode ─────────────────────────────
+    // When enabled, the bot REPLACES traditional exits (SL, low yield, Rule 6)
+    // with a "hold until profitable" philosophy. Only these exits fire:
+    //   1. Profit target — PnL ≥ holdUntilProfitMinPct (default 1%)
+    //   2. Depth safety — PnL ≤ holdUntilProfitDepthLossPct (default -50%, catastrophic)
+    //   3. TVL safety — fee/TVL 24h < holdUntilProfitTvlThreshold for
+    //      holdUntilProfitTvlHours hours (pool effectively dead)
+    //   4. Trailing TP — kept (locks profit on the way up)
+    //   5. OOR wait — kept (no point holding out-of-range)
+    // Trade-off: catches bounces (RIV case) but bounded downside to -50% via
+    // depth safety net. Disables bounce-hold SL (Layer 2) — mutually exclusive.
+    holdUntilProfit:              u.holdUntilProfit              ?? false,
+    holdUntilProfitMinPct:        u.holdUntilProfitMinPct        ?? 1,
+    holdUntilProfitDepthLossPct:  u.holdUntilProfitDepthLossPct  ?? -50,
+    holdUntilProfitTvlThreshold:  u.holdUntilProfitTvlThreshold  ?? 1,
+    holdUntilProfitTvlHours:      u.holdUntilProfitTvlHours      ?? 4,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
@@ -157,6 +185,10 @@ export const config = {
     managementIntervalMin:  u.managementIntervalMin  ?? 10,
     screeningIntervalMin:   u.screeningIntervalMin   ?? 30,
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
+    // When false, suppress the routine "Screening Cycle" / "Management Cycle"
+    // chat notifications (the ones that wake up the external Hermes agent and
+    // burn its tokens). Real alerts (deploy/close/OOR/error) are unaffected.
+    notifyRoutineCycles:    u.notifyRoutineCycles    ?? true,
   },
 
   // ─── LLM Settings ──────────────────────
@@ -192,6 +224,7 @@ export const config = {
 
   // ─── HiveMind ─────────────────────────
   hiveMind: {
+    enabled: u.hiveMindEnabled ?? true, // user-toggle: set false to fully disable (overrides url/apiKey presence)
     url: nonEmptyString(u.hiveMindUrl, DEFAULT_HIVEMIND_URL),
     apiKey: nonEmptyString(u.hiveMindApiKey, process.env.HIVEMIND_API_KEY, DEFAULT_HIVEMIND_API_KEY),
     agentId: u.agentId ?? null,
