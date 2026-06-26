@@ -132,10 +132,11 @@ VOLATILITY BAND (token selection — backed by spot history):
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
-- STRATEGY: config.strategy = "spot" — ALWAYS use spot. Do NOT pick curve or bid_ask.
-  * spot → deploy bins above AND below current price, symmetric (bins_above = bins_below). Fee starts immediately. This is the ONLY allowed strategy regardless of price_change_24h.
-  * Philosophy: spot on a dump is goat — we farm fees from volatility while in-range, we do not try to time the bottom with bid_ask.
-- Use amount_y only, keep amount_x=0.
+- STRATEGY: choose per-candidate between "bid_ask" and "spot" (default if unsure: "${config.strategy.strategy}"). NEVER pick curve. Pass your choice in the deploy_position "strategy" arg. Both deploy single-side SOL (amount_y only, bins BELOW active price) — the difference is liquidity DISTRIBUTION inside that range:
+  * spot → liquidity spread EVENLY across the lower bins. Farms fees immediately around the current price. Best when the token sits in the volatility SWEET SPOT (3.5–6.0) and is chopping range-bound near current price — you want fees concentrated where the action is. Spot history shows the edge lives here.
+  * bid_ask → liquidity WEIGHTED toward the lowest bins (deeper downside cushion). Best when you want more protection: the token looks dip-prone, fee/TVL is strong but price action is choppier/lower, or you're deploying into something that could flush before it chops. Survives dips/OOR better than spot because the cushion sits below.
+  * DECISION RULE: if the candidate is squarely in the 3.5–6.0 volatility sweet spot AND not actively pumping → prefer spot (capture fees at the price). If it's more volatile, dip-prone, or you want downside insurance → prefer bid_ask. When genuinely unsure, default to "${config.strategy.strategy}".
+- Use amount_y only, keep amount_x=0. Keep bins_above=0 for both strategies (single-side SOL).
 - Bin steps must be within [config.screening.minBinStep, config.screening.maxBinStep] (currently [${config.screening.minBinStep}-${config.screening.maxBinStep}]).
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 

@@ -105,12 +105,40 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
-let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
+
+// ───────────────────────────────────────────────────────────────────
+//  DETERMINISTIC CLOSE — poller closes a confirmed exit DIRECTLY via
+//  executeTool, no LLM, no management-interval cooldown. The mechanical
+//  exit decision (SL bounce-hold, trailing, OOR, ladder) already happened
+//  in updatePnlAndCheckExits / getDeterministicCloseRule; here we only
+//  execute the close the same way executeTool runs it from the LLM path,
+//  so all post-close side-effects (auto-swap base→SOL, pool-memory
+//  annotation, telegram notify) still fire. Returns true on success.
+//  Holds _managementBusy so the cron management cycle can't double-act.
+async function pollerDirectClose(position, reason) {
+  _managementBusy = true;
+  try {
+    log("cron", `[PnL poll] Direct close (no LLM): ${position.pair} — ${reason}`);
+    const res = await executeTool("close_position", {
+      position_address: position.position,
+      reason,
+    }).catch((e) => ({ error: e.message }));
+    const ok = res?.success !== false && !res?.error && !res?.blocked;
+    if (ok) {
+      log("state", `[PnL poll] ${position.pair}: closed (${reason})`);
+    } else {
+      log("cron_error", `[PnL poll] ${position.pair}: close FAILED — ${res?.error || res?.reason || "unknown"}`);
+    }
+    return ok;
+  } finally {
+    _managementBusy = false;
+  }
+}
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
@@ -166,8 +194,14 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
-        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
-        runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
+        if (position) {
+          log("state", `[Trailing recheck] Confirmed trailing exit for ${position.pair} — closing directly`);
+          await pollerDirectClose(position, resolved.reason || `Trailing TP confirmed (peak drop)`);
+        } else {
+          // Position not in live snapshot (already gone / fetch failed) — fall back to mgmt cycle.
+          log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} but no live snapshot — triggering management`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
+        }
       }
     } catch (error) {
       log("state_warn", `Trailing drop confirmation failed for ${positionAddress}: ${error.message}`);
@@ -900,30 +934,19 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
-          const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
-            _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
-            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
-          } else {
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
-          }
+          // Confirmed/immediate exit (SL bounce-hold matured, OOR, confirmed trailing) —
+          // close DIRECTLY, no LLM, no cooldown. The decision is already final here.
+          log("state", `[PnL poll] Exit: ${p.pair} — ${exit.reason} — closing directly`);
+          await pollerDirectClose(p, exit.reason);
           break;
         }
         const closeRule = await getDeterministicCloseRule(p, config.management);
         if (closeRule) {
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
-          const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
-            _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management`);
-            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
-          } else {
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
-          }
+          log("state", `[PnL poll] Deterministic close rule ${closeRule.rule}: ${p.pair} — ${closeRule.reason} — closing directly`);
+          await pollerDirectClose(p, `Rule ${closeRule.rule}: ${closeRule.reason}`);
           break;
         }
+
       }
     } finally {
       _pnlPollBusy = false;
